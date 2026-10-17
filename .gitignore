@@ -1,0 +1,120 @@
+# ============================================================
+# SmartHire – Git Ignore Rules
+# ============================================================
+
+# ----------------------------------------------------------
+# Python bytecode & cache
+# ----------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+
+# ----------------------------------------------------------
+# Python virtual environments
+# (common names used by venv, virtualenv, conda, pipenv, poetry)
+# ----------------------------------------------------------
+venv/
+.venv/
+env/
+.env/
+ENV/
+.ENV/
+virtualenv/
+.virtualenv/
+conda-env/
+.conda/
+
+# ----------------------------------------------------------
+# Large sparse matrix feature files (> 100 MB each)
+# Re-generate with: python main.py  (or run_group_kfold.py)
+# ----------------------------------------------------------
+models/X_train.npz
+models/X_test.npz
+
+# ----------------------------------------------------------
+# Raw & processed dataset caches under data/
+# These are downloaded / generated automatically by the pipeline.
+# Re-generate with: python main.py
+# ----------------------------------------------------------
+data/raw/
+data/processed/
+
+# Keep the data/ folder itself in the repo (but not its contents)
+# The pipeline creates subdirs automatically via config.py
+!data/.gitkeep
+
+# ----------------------------------------------------------
+# Jupyter notebook checkpoints
+# ----------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ----------------------------------------------------------
+# Private / sensitive files
+# ----------------------------------------------------------
+# Secrets, API tokens, credentials
+.env
+*.env
+secrets.yaml
+secrets.json
+credentials.json
+*.pem
+*.key
+
+# Personal resumes or private documents
+*.pdf
+resumes/
+personal/
+
+# ----------------------------------------------------------
+# OS-generated files
+# ----------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ----------------------------------------------------------
+# Editor / IDE metadata
+# ----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ----------------------------------------------------------
+# Build / distribution artefacts
+# ----------------------------------------------------------
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+site/
+
+# ----------------------------------------------------------
+# Pytest / coverage
+# ----------------------------------------------------------
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.coveragerc
+
+# ----------------------------------------------------------
+# MyPy / type-checking cache
+# ----------------------------------------------------------
+.mypy_cache/
+.dmypy.json
+
+# ----------------------------------------------------------
+# Logs & temporary files
+# ----------------------------------------------------------
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig

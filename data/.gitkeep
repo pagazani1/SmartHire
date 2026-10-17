@@ -1,0 +1,10 @@
+# This file keeps the data/ folder tracked by Git
+# even though its raw/ and processed/ contents are excluded.
+#
+# The SmartHire pipeline automatically downloads and creates:
+#   data/raw/raw_train.parquet
+#   data/raw/raw_test.parquet
+#   data/processed/clean_train.parquet
+#   data/processed/clean_test.parquet
+#
+# To regenerate, run:  python main.py
