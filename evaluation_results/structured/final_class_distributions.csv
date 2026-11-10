@@ -1,0 +1,4 @@
+label,actual_count,text_logistic_regression_predicted_count,structured_only_predicted_count,hybrid_predicted_count
+Good Fit,1277,3751,4930,3272
+No Fit,14386,10828,10297,10834
+Potential Fit,3520,4604,3956,5077

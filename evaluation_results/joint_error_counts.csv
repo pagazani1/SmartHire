@@ -1,0 +1,5 @@
+error_outcome,count
+both_models_wrong,3580
+only_logistic_regression_wrong,1681
+only_linearsvc_wrong,1540
+both_models_correct,12112

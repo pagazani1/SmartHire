@@ -63,10 +63,21 @@ def get_multiline_input(prompt: str) -> str:
     return text
 
 
-def validate_input(text: str, name: str) -> None:
-    """Raise an error if the input is empty after stripping whitespace."""
+def validate_text_input(text: object, name: str) -> str:
+    """Validate an inference text value and return it unchanged."""
+    if not isinstance(text, str):
+        raise ValueError(f"{name} must be a string.")
     if not text.strip():
-        print(f"\n[ERROR] {name} cannot be empty. Please provide some text.")
+        raise ValueError(f"{name} cannot be empty. Please provide some text.")
+    return text
+
+
+def validate_input(text: str, name: str) -> None:
+    """Preserve the CLI's printed error and exit behavior for invalid input."""
+    try:
+        validate_text_input(text, name)
+    except ValueError as error:
+        print(f"\n[ERROR] {error}")
         sys.exit(1)
 
 
@@ -84,6 +95,9 @@ def predict(resume_text: str, jd_text: str, vectorizer, model) -> dict:
         - 'label'  : predicted class string
         - 'probs'  : dict mapping each class name → probability (0-1)
     """
+    validate_text_input(resume_text, "Resume")
+    validate_text_input(jd_text, "Job description")
+
     # Step 1 – clean
     resume_clean = clean_text(resume_text)
     jd_clean     = clean_text(jd_text)

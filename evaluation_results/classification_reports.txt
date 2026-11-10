@@ -1,0 +1,66 @@
+
+Majority Baseline
+Accuracy: 0.730714
+Macro-F1: 0.281469
+Weighted-F1: 0.617021
+Classification report:
+               precision    recall  f1-score   support
+
+     Good Fit       0.00      0.00      0.00      1618
+       No Fit       0.73      1.00      0.84     13820
+Potential Fit       0.00      0.00      0.00      3475
+
+     accuracy                           0.73     18913
+    macro avg       0.24      0.33      0.28     18913
+ weighted avg       0.53      0.73      0.62     18913
+
+Confusion matrix (rows=actual, columns=predicted):
+predicted      Good Fit  No Fit  Potential Fit
+actual                                        
+Good Fit              0    1618              0
+No Fit                0   13820              0
+Potential Fit         0    3475              0
+
+Logistic Regression
+Accuracy: 0.721832
+Macro-F1: 0.605955
+Weighted-F1: 0.737211
+Classification report:
+               precision    recall  f1-score   support
+
+     Good Fit       0.43      0.63      0.51      1618
+       No Fit       0.89      0.78      0.83     13820
+Potential Fit       0.42      0.55      0.48      3475
+
+     accuracy                           0.72     18913
+    macro avg       0.58      0.65      0.61     18913
+ weighted avg       0.76      0.72      0.74     18913
+
+Confusion matrix (rows=actual, columns=predicted):
+predicted      Good Fit  No Fit  Potential Fit
+actual                                        
+Good Fit           1012     226            380
+No Fit              880   10741           2199
+Potential Fit       448    1128           1899
+
+Linear Svc
+Accuracy: 0.729287
+Macro-F1: 0.568731
+Weighted-F1: 0.726771
+Classification report:
+               precision    recall  f1-score   support
+
+     Good Fit       0.50      0.45      0.47      1618
+       No Fit       0.83      0.85      0.84     13820
+Potential Fit       0.40      0.38      0.39      3475
+
+     accuracy                           0.73     18913
+    macro avg       0.58      0.56      0.57     18913
+ weighted avg       0.72      0.73      0.73     18913
+
+Confusion matrix (rows=actual, columns=predicted):
+predicted      Good Fit  No Fit  Potential Fit
+actual                                        
+Good Fit            736     483            399
+No Fit              461   11720           1639
+Potential Fit       284    1854           1337

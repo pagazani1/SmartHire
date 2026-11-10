@@ -1,0 +1,19 @@
+model,actual_label,predicted_label,count
+Logistic Regression,Good Fit,Good Fit,1012
+Logistic Regression,Good Fit,No Fit,226
+Logistic Regression,Good Fit,Potential Fit,380
+Logistic Regression,No Fit,Good Fit,880
+Logistic Regression,No Fit,No Fit,10741
+Logistic Regression,No Fit,Potential Fit,2199
+Logistic Regression,Potential Fit,Good Fit,448
+Logistic Regression,Potential Fit,No Fit,1128
+Logistic Regression,Potential Fit,Potential Fit,1899
+LinearSVC,Good Fit,Good Fit,736
+LinearSVC,Good Fit,No Fit,483
+LinearSVC,Good Fit,Potential Fit,399
+LinearSVC,No Fit,Good Fit,461
+LinearSVC,No Fit,No Fit,11720
+LinearSVC,No Fit,Potential Fit,1639
+LinearSVC,Potential Fit,Good Fit,284
+LinearSVC,Potential Fit,No Fit,1854
+LinearSVC,Potential Fit,Potential Fit,1337

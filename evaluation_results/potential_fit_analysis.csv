@@ -1,0 +1,11 @@
+model,analysis,category,count
+Logistic Regression,actual_potential_fit_predicted_as,Good Fit,448
+Logistic Regression,predicted_potential_fit_actual_class,Good Fit,380
+Logistic Regression,actual_potential_fit_predicted_as,No Fit,1128
+Logistic Regression,predicted_potential_fit_actual_class,No Fit,2199
+Logistic Regression,actual_potential_fit_predicted_as,Potential Fit,1899
+LinearSVC,actual_potential_fit_predicted_as,Good Fit,284
+LinearSVC,predicted_potential_fit_actual_class,Good Fit,399
+LinearSVC,actual_potential_fit_predicted_as,No Fit,1854
+LinearSVC,predicted_potential_fit_actual_class,No Fit,1639
+LinearSVC,actual_potential_fit_predicted_as,Potential Fit,1337

@@ -1,0 +1,14 @@
+{
+  "status": "incomplete_runtime_limit",
+  "experiment_id": "smarthire-stage5c-separate-text-skill-fusion-v1",
+  "elapsed_runtime_minutes_approx": 66,
+  "last_observed_process_cpu_seconds": 3711.1,
+  "last_observed_process_working_set_mib": 711.9,
+  "last_observed_available_system_ram_mib": 728.5,
+  "memory_safety_floor_mib": 256,
+  "grouped_fold_metrics_saved": 0,
+  "in_memory_fold_progress_known": false,
+  "holdout_metrics_saved": false,
+  "model_bundle_saved": false,
+  "reason": "The controlled run remained CPU-bound past the interactive runtime limit and was stopped. No evaluation protocol settings were changed."
+}

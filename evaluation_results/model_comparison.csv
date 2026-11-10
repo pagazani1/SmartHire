@@ -1,0 +1,3 @@
+model,accuracy,macro_f1,incorrect_predictions
+Logistic Regression,0.721831544440332,0.6059552619167946,5261
+LinearSVC,0.7292867339924919,0.5687311427644163,5120
