@@ -1,13 +1,15 @@
 # SmartHire Architecture Audit and Database Design
 
-**Status:** Architecture baseline. The initial PostgreSQL/SQLAlchemy/Alembic
-infrastructure is implemented as documented in [DATABASE_SETUP.md](./DATABASE_SETUP.md).
-The screening API remains stateless; persistence workflows still require
-separate implementation and policy approval.
+**Status:** Architecture baseline. PostgreSQL/SQLAlchemy/Alembic and the
+candidate/application APIs are implemented as documented in
+[DATABASE_SETUP.md](./DATABASE_SETUP.md) and [API.md](./API.md).
+`POST /api/analyze/` remains stateless; screening writes are deferred until
+private document storage is selected.
 
 ## 1. Executive summary
 
-SmartHire is currently a local, stateless resume-screening prototype:
+SmartHire is currently a local recruiter application with stateless resume
+screening and an initial candidate/application persistence API:
 
 - A synchronous FastAPI service exposes health and PDF-analysis endpoints.
 - The analysis path extracts PDF text, runs the existing combined-text
@@ -15,18 +17,22 @@ SmartHire is currently a local, stateless resume-screening prototype:
   the production required-skill-group decision policy.
 - A React 19/Vite 6/Tailwind 4 frontend submits one PDF and one job
   description to the API and renders the final assessment and skill evidence.
-- The API does not persist recruiters, jobs, candidates, applications,
-  documents, screening runs, or verification records.
+- Job creation, listing, retrieval, and update APIs are implemented. Job
+  creation requires an existing recruiter; candidate creation links to an
+  existing job and creates an application. Authentication and authorization
+  are not implemented.
+- Candidate profiles and applications can be persisted and queried. Screening
+  history can be read if records exist, but there is no screening-write API;
+  `POST /api/analyze/` remains stateless.
 - Authentication is not implemented. The current upload is temporarily stored
   and deleted after analysis.
 - `src/background_verification.py` and `src/candidate_report.py` implement
   in-memory verification and report assembly; they are not database modules.
 
-The recommended next persistence layer is PostgreSQL, introduced behind
-repositories and versioned Alembic migrations. Keep the existing screening
-pipeline and `/api/analyze/` response behavior intact. Add persistent
-application-scoped workflows as new endpoints, initially opt-in, after
-consent, authorization, retention, and storage policies are approved.
+PostgreSQL, SQLAlchemy, and Alembic provide the persistence foundation. Keep
+the existing screening pipeline and `/api/analyze/` response behavior intact.
+Add persistent screening workflows only after private document storage,
+consent, authorization, and retention policies are approved.
 
 ## 2. Current architecture audit
 
@@ -37,7 +43,15 @@ consent, authorization, retention, and storage policies are approved.
 | Endpoint | Request | Response / behavior |
 |---|---|---|
 | `GET /api/health/` | None | `{"status":"ok"}` |
+| `POST /api/jobs/` | JSON job data, including an existing `created_by_recruiter_id`, description, and optional requirement groups | 201 job with first description version; 404 for an unknown recruiter; 422 for invalid input |
+| `GET /api/jobs/` | Optional `limit` (1–100) and `offset` | Jobs, newest first, with current description and requirements |
+| `GET /api/jobs/{job_id}` | UUID path parameter | Job with current description and requirements; 404 if unknown |
+| `PUT /api/jobs/{job_id}` | Partial JSON update | Updated job; description or requirement changes append a version; 404 if unknown |
 | `POST /api/analyze/` | `multipart/form-data`: `file` (PDF), `jd_text` (string) | `AnalysisResponse`; 422 for invalid/missing JD or file, 400 for unreadable/no-text PDF, sanitized 500 for internal failures |
+| `POST /api/candidates/` | JSON candidate profile plus existing `job_id` | 201 candidate and application; 404 if job is unknown; 422 for invalid input |
+| `GET /api/candidates/` | Optional `limit` (1–100) and `offset` | Candidate profiles, newest first |
+| `GET /api/candidates/{candidate_id}` | UUID path parameter | Candidate profile and linked applications; 404 if unknown |
+| `GET /api/candidates/{candidate_id}/screenings/` | UUID path parameter and optional pagination | Persisted screening history; empty list until results exist; 404 if candidate is unknown |
 
 For `/api/analyze/`, the backend streams the upload to a temporary directory,
 calls `src.resume_analyzer.analyze_resume()`, then removes the directory. It
@@ -61,8 +75,22 @@ preferred skills, coverage metrics, and extraction limitations.
    [production_decision_policy.md](../evaluation_results/production_decision_policy.md).
 
 Do not change these existing algorithms as part of database implementation.
-Persist the returned output as a screening record; do not reimplement
-extraction or prediction in repositories or API handlers.
+When screening persistence is implemented, persist the returned output as a
+screening record; do not reimplement extraction or prediction in repositories
+or API handlers.
+
+The job API creates jobs and their first immutable description versions for
+an already existing recruiter. Subsequent description or skill-requirement
+changes append versions; scalar job updates preserve the current version.
+The development-only recruiter seed command is documented in [API.md](./API.md)
+and is not a public recruiter provisioning endpoint.
+
+The candidate API creates a `Candidate` and linked `Application` in one
+transaction for an already existing job. Screening-history reads use existing
+`ScreeningResult`, `ScreeningRequirementResult`, and skill relationships.
+There is intentionally no screening-write endpoint yet: the repository has no
+private document-storage service, and each `ScreeningResult` must reference a
+valid `ResumeDocument`.
 
 ### Frontend
 
@@ -393,11 +421,12 @@ async only if deployment and load requirements justify its extra complexity.
    by the current ordinary test suite.
 4. Review and apply the initial migration in a new, explicitly selected
    database after backup and migration-SQL review.
-5. Implement repositories and services with transaction and authorization
-   tests; add private object storage and deletion lifecycle.
-6. Add persistent job/candidate/application/screening APIs while keeping
-   `GET /api/health/` and current stateless `POST /api/analyze/` behavior
-   unchanged.
+5. Add authentication/authorization, consent enforcement, private object
+   storage, and its deletion lifecycle; add repository/service boundaries and
+   transaction tests.
+6. Add recruiter/job workflows and persistent application-scoped screening
+   writes while keeping `GET /api/health/` and stateless `POST /api/analyze/`
+   behavior unchanged.
 7. Persist screening snapshots and normalized requirement/skill evidence;
    verify exact model probabilities and policy version round-trip.
 8. Add reviewer-managed verification persistence and append-only status
@@ -409,10 +438,10 @@ async only if deployment and load requirements justify its extra complexity.
 
 ## 10. Decision and open questions
 
-The initial infrastructure uses PostgreSQL, SQLAlchemy, and Alembic as
-requested. No PostgreSQL connection was configured or tested during this
-implementation, and no candidate or screening data is persisted. The
-following workflow and policy decisions remain open:
+The infrastructure uses PostgreSQL, SQLAlchemy, and Alembic. Candidate and
+application persistence is available; screening writes and PostgreSQL
+connectivity were not verified in this implementation. The following
+workflow and policy decisions remain open:
 
 - single recruiter workspace versus organization/tenant support;
 - whether candidates enter applications themselves or recruiters create
@@ -427,7 +456,8 @@ following workflow and policy decisions remain open:
 - which screening evidence must be queryable versus retained only in the
   immutable response snapshot.
 
-The ORM/migration layer is only a foundation: authentication, authorization,
-repositories, consent enforcement, private document storage, retention jobs,
-and persistent endpoints remain unimplemented. Keep the existing screening
-pipeline and API stateless until those controls are designed and tested.
+The ORM and candidate endpoints are still a foundation: authentication,
+authorization, consent enforcement, private document storage, retention jobs,
+and screening writes remain unimplemented. Do not expose candidate endpoints
+on an untrusted network until access controls and consent/retention policies
+are in place.

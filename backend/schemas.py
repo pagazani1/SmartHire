@@ -1,15 +1,11 @@
-"""Pydantic request schemas for future recruiter and screening endpoints.
-
-These schemas define validation boundaries only; no CRUD endpoints or database
-writes are added in this infrastructure phase.
-"""
+"""Pydantic request and response schemas for recruiter and screening APIs."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.db.models import (
     ApplicationStatus,
@@ -23,6 +19,31 @@ from backend.db.models import (
     RequirementKind,
     VerificationStatus,
 )
+from src.skill_extractor import SKILL_VOCABULARY
+
+
+_CANONICAL_SKILLS = {skill.casefold(): skill for skill in SKILL_VOCABULARY}
+
+
+def _validate_skill_groups(groups: list[list[str]]) -> list[list[str]]:
+    canonical_groups: list[list[str]] = []
+    for group in groups:
+        if not group or len(group) > 20:
+            raise ValueError("Each skill group must contain between 1 and 20 skills.")
+        canonical_group = []
+        for skill in group:
+            canonical = _CANONICAL_SKILLS.get(skill.strip().casefold())
+            if canonical is None:
+                raise ValueError(
+                    f"'{skill}' is not in the supported canonical skill vocabulary."
+                )
+            canonical_group.append(canonical)
+        if len(set(canonical_group)) != len(canonical_group):
+            raise ValueError("A skill may only appear once in a requirement group.")
+        canonical_groups.append(canonical_group)
+    if len(canonical_groups) > 100:
+        raise ValueError("At most 100 requirement groups may be provided.")
+    return canonical_groups
 
 
 class ORMModel(BaseModel):
@@ -41,6 +62,89 @@ class JobCreate(BaseModel):
     department: str | None = Field(default=None, max_length=200)
     location: str | None = Field(default=None, max_length=300)
     status: JobStatus = JobStatus.DRAFT
+    description: str = Field(min_length=1, max_length=50000)
+    required_skill_groups: list[list[str]] = Field(default_factory=list, max_length=100)
+    preferred_skill_groups: list[list[str]] = Field(default_factory=list, max_length=100)
+
+    @field_validator("title", "description", mode="before")
+    @classmethod
+    def strip_required_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("department", "location")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("required_skill_groups", "preferred_skill_groups")
+    @classmethod
+    def canonicalize_skill_groups(cls, value: list[list[str]]) -> list[list[str]]:
+        return _validate_skill_groups(value)
+
+
+class JobUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    department: str | None = Field(default=None, max_length=200)
+    location: str | None = Field(default=None, max_length=300)
+    status: JobStatus | None = None
+    description: str | None = Field(default=None, max_length=50000)
+    required_skill_groups: list[list[str]] | None = Field(default=None, max_length=100)
+    preferred_skill_groups: list[list[str]] | None = Field(default=None, max_length=100)
+
+    @field_validator("title", "description", mode="before")
+    @classmethod
+    def strip_required_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("department", "location")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("required_skill_groups", "preferred_skill_groups")
+    @classmethod
+    def canonicalize_optional_skill_groups(
+        cls, value: list[list[str]] | None
+    ) -> list[list[str]] | None:
+        return None if value is None else _validate_skill_groups(value)
+
+    @model_validator(mode="after")
+    def validate_changes(self) -> JobUpdate:
+        if not self.model_fields_set:
+            raise ValueError("At least one job field must be provided.")
+        for field in ("title", "description", "status"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null.")
+        for field in ("required_skill_groups", "preferred_skill_groups"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null.")
+        return self
+
+
+class JobRequirementGroupRead(BaseModel):
+    kind: RequirementKind
+    ordinal: int
+    display_text: str | None
+    skills: list[str]
+
+
+class JobRead(ORMModel):
+    id: UUID
+    created_by_recruiter_id: UUID
+    title: str
+    department: str | None
+    location: str | None
+    status: JobStatus
+    created_at: datetime
+    updated_at: datetime
+    description: str | None
+    description_version: int | None
+    required_skill_groups: list[list[str]]
+    preferred_skill_groups: list[list[str]]
 
 
 class JobDescriptionVersionCreate(BaseModel):
@@ -53,8 +157,64 @@ class JobDescriptionVersionCreate(BaseModel):
 class CandidateCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
     email: str | None = Field(default=None, max_length=320)
-    email_normalized: str | None = Field(default=None, max_length=320)
     phone: str | None = Field(default=None, max_length=50)
+    job_id: UUID
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def strip_display_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("email", "phone")
+    @classmethod
+    def normalize_optional_contact_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class CandidateRead(ORMModel):
+    id: UUID
+    display_name: str
+    email: str | None
+    phone: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ApplicationRead(ORMModel):
+    id: UUID
+    job_id: UUID
+    status: ApplicationStatus
+    created_at: datetime
+
+
+class CandidateCreatedResponse(BaseModel):
+    candidate: CandidateRead
+    application: ApplicationRead
+
+
+class CandidateDetailResponse(CandidateRead):
+    applications: list[ApplicationRead]
+
+
+class ScreeningHistoryRead(BaseModel):
+    id: UUID
+    application_id: UUID
+    resume_document_id: UUID
+    job_description_version_id: UUID
+    created_at: datetime
+    final_label: FitLabel
+    model_label: FitLabel
+    model_probabilities: dict[str, float]
+    decision_policy_version: str
+    decision_explanation: str | None
+    matched_required_skills: list[str]
+    missing_required_skills: list[str]
+    required_group_count: int
+    matched_required_group_count: int
+    required_skill_coverage: float | None
 
 
 class ApplicationCreate(BaseModel):
@@ -143,14 +303,22 @@ class VerificationRecordCreate(BaseModel):
 
 
 __all__ = [
+    "ApplicationRead",
     "ApplicationCreate",
     "CandidateCreate",
+    "CandidateCreatedResponse",
+    "CandidateDetailResponse",
+    "CandidateRead",
     "ConsentRecordCreate",
     "JobCreate",
+    "JobRead",
+    "JobRequirementGroupRead",
+    "JobUpdate",
     "JobDescriptionVersionCreate",
     "RecruiterCreate",
     "ResumeDocumentCreate",
     "ScreeningEvidenceCreate",
     "ScreeningResultCreate",
+    "ScreeningHistoryRead",
     "VerificationRecordCreate",
 ]
