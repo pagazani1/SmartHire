@@ -1,18 +1,29 @@
 """FastAPI endpoints for SmartHire resume analysis."""
 
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, AsyncIterator
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from backend.db.session import dispose_engine
 from predict import validate_text_input
 from src.pdf_extractor import PDFExtractionError
 from src.resume_analyzer import analyze_resume
 
 
-app = FastAPI(title="SmartHire API")
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Dispose any lazily-created database pool during application shutdown."""
+    try:
+        yield
+    finally:
+        dispose_engine()
+
+
+app = FastAPI(title="SmartHire API", lifespan=lifespan)
 
 
 class AnalysisResponse(BaseModel):
