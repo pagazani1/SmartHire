@@ -31,6 +31,24 @@ def analyze_resume(pdf_path: str | Path, jd_text: object) -> dict:
     model_prediction = predict(resume_text, validated_jd, vectorizer, model)
     skills = analyse_skills(resume_text, validated_jd)
     decision = apply_decision_policy(model_prediction, skills)
+    decision_evidence = decision["decision_evidence"]
+    coverage_metrics = dict(skills["coverage_metrics"])
+    coverage_metrics.update(
+        {
+            "required_skill_coverage": decision_evidence[
+                "required_skill_coverage"
+            ],
+            "required_skill_coverage_percentage": decision_evidence[
+                "required_skill_coverage_percentage"
+            ],
+            "required_skill_count": decision_evidence[
+                "required_skill_group_count"
+            ],
+            "matched_required_group_count": decision_evidence[
+                "matched_required_group_count"
+            ],
+        }
+    )
 
     return {
         **decision,
@@ -41,18 +59,14 @@ def analyze_resume(pdf_path: str | Path, jd_text: object) -> dict:
         "detected_jd_skills": sorted(skills["jd_skills"]),
         "required_skills": sorted(skills["required_skills"]),
         "preferred_skills": sorted(skills["preferred_skills"]),
-        "required_skill_groups": [
-            sorted(group) for group in skills["required_skill_groups"]
-        ],
-        "preferred_skill_groups": [
-            sorted(group) for group in skills["preferred_skill_groups"]
-        ],
+        "required_skill_groups": decision_evidence["required_skill_groups"],
+        "preferred_skill_groups": decision_evidence["preferred_skill_groups"],
         "matched_required_skills": sorted(skills["matched_required_skills"]),
         "missing_required_skills": sorted(skills["missing_required_skills"]),
         "matched_preferred_skills": sorted(skills["matched_preferred_skills"]),
         "missing_preferred_skills": sorted(skills["missing_preferred_skills"]),
         "unclassified_jd_skills": sorted(skills["unclassified_jd_skills"]),
         "total_jd_skills": skills["total_jd_skills"],
-        "coverage_metrics": skills["coverage_metrics"],
+        "coverage_metrics": coverage_metrics,
         "extraction_limitations": skills["extraction_limitations"],
     }

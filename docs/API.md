@@ -160,6 +160,22 @@ skill evidence, decision explanation, and extraction limitations. The PDF
 is temporarily stored and deleted after analysis. This route does not create
 candidate, application, document, or screening records.
 
+When reliable required skill groups and resume skill evidence are available,
+the final `label` uses the required-group coverage policy: at least 85% is
+`Good Fit`, at least 50% and below 85% is `Potential Fit`, and below 50% is
+`No Fit`. The decision uses the exact matched/total counts, not a rounded
+display percentage. Alternative skills in one group count as one requirement;
+preferred skills do not contribute. The response's `decision_evidence`
+contains `matched_required_group_count`, `required_skill_group_count`,
+`missing_required_group_count`, `required_skill_coverage` (0–1),
+`required_skill_coverage_percentage` (0–100), the matched and missing groups,
+and `required_skill_evidence_status`. If there are no required groups or
+evidence is unavailable, the final label falls back to `model_label` and
+coverage is `null`. `model_label`, `model_probs`, and `probs` preserve the
+original text-model result. See
+[production_decision_policy.md](../evaluation_results/production_decision_policy.md)
+for the policy and limitations.
+
 ## Security and deployment status
 
 Authentication and authorization are not implemented. Candidate endpoints

@@ -63,6 +63,7 @@ class TestAnalyzeResume(unittest.TestCase):
             "total_jd_skills": 3,
             "coverage_metrics": {
                 "required_skill_coverage": 1.0,
+                "required_skill_coverage_percentage": 100.0,
                 "preferred_skill_coverage": 1.0,
                 "overall_skill_coverage": 2 / 3,
                 "required_skill_count": 1,
@@ -117,6 +118,10 @@ class TestAnalyzeResume(unittest.TestCase):
         self.assertEqual(
             result["coverage_metrics"]["overall_skill_coverage"],
             2 / 3,
+        )
+        self.assertEqual(
+            result["coverage_metrics"]["required_skill_coverage_percentage"],
+            100.0,
         )
         self.assertEqual(result["extraction_limitations"], expected_skills["extraction_limitations"])
         self.assertNotIn("resume_text", result)
@@ -214,7 +219,7 @@ class TestAnalyzeResume(unittest.TestCase):
         )
         expected = {
             "Strong": ("Good Fit", 12, 12),
-            "Partial": ("Potential Fit", 4, 12),
+            "Partial": ("No Fit", 4, 12),
             "Weak": ("No Fit", 0, 12),
         }
         with (
@@ -242,6 +247,10 @@ class TestAnalyzeResume(unittest.TestCase):
                     self.assertEqual(
                         evidence["missing_required_group_count"],
                         required_count - matched_count,
+                    )
+                    self.assertAlmostEqual(
+                        evidence["required_skill_coverage_percentage"],
+                        matched_count / required_count * 100,
                     )
                     self.assertTrue(evidence["structured_evidence_available"])
 

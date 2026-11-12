@@ -70,8 +70,10 @@ preferred skills, coverage metrics, and extraction limitations.
 3. `src.skill_extractor.analyse_skills()` independently extracts skills and
    classifies/group requirements using a fixed vocabulary and rules.
 4. `src.decision_policy.apply_decision_policy()` uses required skill group
-   coverage for the final recruiter-facing label when evidence is available.
-   The model output is preserved separately. Policy details are in
+   coverage for the final recruiter-facing label when evidence is available:
+   at least 85% is Good Fit, at least 50% and below 85% is Potential Fit, and
+   below 50% is No Fit. Missing or absent evidence falls back to the text-model
+   label; model output is preserved separately. Policy details are in
    [production_decision_policy.md](../evaluation_results/production_decision_policy.md).
 
 Do not change these existing algorithms as part of database implementation.

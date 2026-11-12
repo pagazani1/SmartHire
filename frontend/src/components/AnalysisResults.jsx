@@ -27,6 +27,16 @@ function AnalysisResults({ result }) {
   const missingRequiredSkills = stringList(
     decisionEvidence.missing_required_skills ?? result.missing_required_skills,
   );
+  const missingRequiredGroups = groupList(
+    decisionEvidence.missing_required_skill_groups,
+  );
+  const hasMissingGroupEvidence = Array.isArray(
+    decisionEvidence.missing_required_skill_groups,
+  );
+  const requiredCoveragePercentage = firstNumber(
+    decisionEvidence.required_skill_coverage_percentage,
+    coverage.required_skill_coverage_percentage,
+  );
   const decisionExplanation =
     typeof result.decision_explanation === "string" &&
     result.decision_explanation.trim()
@@ -78,39 +88,61 @@ function AnalysisResults({ result }) {
                 Required skill groups matched
               </dt>
               <dd className="mt-1 text-sm font-semibold tabular-nums text-slate-900">
-                {matchedRequiredGroups !== null && requiredGroupCount !== null
-                  ? `${matchedRequiredGroups} of ${requiredGroupCount}`
-                  : "Not available"}
+                {decisionEvidence.structured_evidence_available === true &&
+                matchedRequiredGroups !== null &&
+                requiredGroupCount !== null
+                  ? `${matchedRequiredGroups} of ${requiredGroupCount}${
+                      requiredCoveragePercentage !== null
+                        ? ` (${formatPercentage(requiredCoveragePercentage)}%)`
+                        : ""
+                    }`
+                  : decisionEvidence.required_skill_evidence_status ===
+                      "no_required_groups"
+                    ? "No required groups identified"
+                    : "Evidence unavailable"}
               </dd>
             </div>
             <div className="sm:col-span-2">
               <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Missing required skills
+                Missing required skill groups
               </dt>
               <dd className="mt-2">
-                {missingRequiredSkills.length > 0 ? (
+                {missingRequiredGroups.length > 0 ? (
                   <ul className="flex flex-wrap gap-2">
-                    {missingRequiredSkills.map((skill) => (
+                    {missingRequiredGroups.map((group) => (
                       <li
                         className="max-w-full break-words rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-900"
-                        key={skill}
+                        key={group.join("|")}
                       >
-                        {skill}
+                        {group.join(" or ")}
                       </li>
                     ))}
                   </ul>
+                ) : decisionEvidence.required_skill_evidence_status ===
+                  "no_required_groups" ? (
+                  <p className="text-sm text-slate-500">
+                    No required groups were identified; missing groups cannot
+                    be assessed.
+                  </p>
                 ) : decisionEvidence.structured_evidence_available === true ||
                   (decisionEvidence.structured_evidence_available !== false &&
-                    Array.isArray(result.missing_required_skills) &&
-                    requiredGroupCount !== null) ? (
+                    hasMissingGroupEvidence) ? (
                   <p className="text-sm text-slate-600">
-                    No missing required skills identified.
+                    No missing required groups identified.
                   </p>
                 ) : (
                   <p className="text-sm text-slate-500">
-                    Required-skill evidence is not available.
+                    Required-skill evidence is unavailable; missing groups
+                    cannot be determined.
                   </p>
                 )}
+                {!hasMissingGroupEvidence &&
+                  decisionEvidence.structured_evidence_available !== false &&
+                  missingRequiredSkills.length > 0 && (
+                    <p className="text-sm text-slate-600">
+                      Detected missing skills: {missingRequiredSkills.join(", ")}
+                    </p>
+                  )}
               </dd>
             </div>
             <div className="sm:col-span-2">
@@ -153,8 +185,17 @@ function AnalysisResults({ result }) {
           <CoverageCard
             label="Required skills"
             value={coverage.required_skill_coverage}
-            matched={coverage.matched_required_group_count}
-            total={coverage.required_skill_count}
+            matched={
+              decisionEvidence.structured_evidence_available === true
+                ? coverage.matched_required_group_count
+                : undefined
+            }
+            total={
+              decisionEvidence.structured_evidence_available === true
+                ? coverage.required_skill_count
+                : undefined
+            }
+            percentageOverride={requiredCoveragePercentage ?? undefined}
           />
           <CoverageCard
             label="Preferred skills"
@@ -239,11 +280,13 @@ function SkillList({ title, skills, emptyText, tone }) {
   );
 }
 
-function CoverageCard({ label, value, matched, total }) {
+function CoverageCard({ label, value, matched, total, percentageOverride }) {
   const hasValue = typeof value === "number" && Number.isFinite(value);
-  const percentage = hasValue
-    ? Math.max(0, Math.min(100, value * 100))
-    : null;
+  const percentage = Number.isFinite(percentageOverride)
+    ? Math.max(0, Math.min(100, percentageOverride))
+    : hasValue
+      ? Math.max(0, Math.min(100, value * 100))
+      : null;
   const hasCounts = typeof matched === "number" && typeof total === "number";
 
   return (
@@ -251,7 +294,9 @@ function CoverageCard({ label, value, matched, total }) {
       <div className="flex items-center justify-between gap-2">
         <h3 className="text-sm font-medium text-slate-700">{label}</h3>
         <span className="text-sm font-semibold tabular-nums text-slate-900">
-          {percentage === null ? "Not available" : `${percentage.toFixed(0)}%`}
+          {percentage === null
+            ? "Not available"
+            : `${formatPercentage(percentage)}%`}
         </span>
       </div>
       {hasCounts && (
@@ -282,6 +327,21 @@ function stringList(value) {
   return Array.isArray(value)
     ? value.filter((item) => typeof item === "string" && item.trim())
     : [];
+}
+
+function groupList(value) {
+  return Array.isArray(value)
+    ? value
+        .filter(Array.isArray)
+        .map((group) =>
+          group.filter((skill) => typeof skill === "string" && skill.trim()),
+        )
+        .filter((group) => group.length > 0)
+    : [];
+}
+
+function formatPercentage(value) {
+  return Number(value.toFixed(2)).toString();
 }
 
 function isRecord(value) {
