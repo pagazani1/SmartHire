@@ -3,8 +3,9 @@
 **Status:** Architecture baseline. PostgreSQL/SQLAlchemy/Alembic and the
 candidate/application APIs are implemented as documented in
 [DATABASE_SETUP.md](./DATABASE_SETUP.md) and [API.md](./API.md).
-`POST /api/analyze/` remains stateless; screening writes are deferred until
-private document storage is selected.
+Private resume-document storage is implemented for explicitly enabled local
+development. `POST /api/analyze/` remains stateless; persistent screening
+writes are still deferred.
 
 ## 1. Executive summary
 
@@ -24,15 +25,18 @@ screening and an initial candidate/application persistence API:
 - Candidate profiles and applications can be persisted and queried. Screening
   history can be read if records exist, but there is no screening-write API;
   `POST /api/analyze/` remains stateless.
-- Authentication is not implemented. The current upload is temporarily stored
-  and deleted after analysis.
+- Resume metadata and PDF files can be uploaded, listed, downloaded through
+  the API, and soft-deleted through a private local filesystem adapter.
+- Authentication and recruiter ownership enforcement are not implemented.
+  Resume management is guarded to explicitly enabled development mode and
+  loopback clients only; it is not production-ready.
 - `src/background_verification.py` and `src/candidate_report.py` implement
   in-memory verification and report assembly; they are not database modules.
 
 PostgreSQL, SQLAlchemy, and Alembic provide the persistence foundation. Keep
 the existing screening pipeline and `/api/analyze/` response behavior intact.
-Add persistent screening workflows only after private document storage,
-consent, authorization, and retention policies are approved.
+Add persistent screening workflows only after production authentication,
+authorization, consent, and retention policies are approved.
 
 ## 2. Current architecture audit
 
@@ -52,6 +56,11 @@ consent, authorization, and retention policies are approved.
 | `GET /api/candidates/` | Optional `limit` (1–100) and `offset` | Candidate profiles, newest first |
 | `GET /api/candidates/{candidate_id}` | UUID path parameter | Candidate profile and linked applications; 404 if unknown |
 | `GET /api/candidates/{candidate_id}/screenings/` | UUID path parameter and optional pagination | Persisted screening history; empty list until results exist; 404 if candidate is unknown |
+| `POST /api/candidates/{candidate_id}/resumes/` | Multipart PDF plus `consent_record_id` | 201 metadata response; development guard, candidate-bound active storage consent, 10 MiB limit |
+| `GET /api/candidates/{candidate_id}/resumes/` | UUID path and optional pagination | Candidate resume metadata, excluding soft-deleted records |
+| `GET /api/resumes/{resume_id}` | UUID path parameter | Resume metadata only; never returns storage key or filesystem path |
+| `GET /api/resumes/{resume_id}/download` | UUID path parameter | Controlled stream of an available private PDF; no public URL |
+| `DELETE /api/resumes/{resume_id}` | UUID path parameter | Physically removes the file and retains soft-deleted metadata; retryable on storage/DB failure |
 
 For `/api/analyze/`, the backend streams the upload to a temporary directory,
 calls `src.resume_analyzer.analyze_resume()`, then removes the directory. It
@@ -59,6 +68,17 @@ does not retain the PDF or extracted text. The response includes the final
 `label`, original model `probs`, `model_label`, `model_probs`, decision policy
 and explanation, matched/missing skill information, grouped required and
 preferred skills, coverage metrics, and extraction limitations.
+
+The separate resume-management API validates a bounded PDF upload, stages and
+hashes the bytes, validates the PDF signature and parseability, checks
+candidate-bound active `DOCUMENT_STORAGE` consent, then writes an opaque
+UUID-keyed object to private filesystem storage and persists only metadata.
+Upload failures after storage trigger compensating deletion. Deletion first
+makes a document unavailable, removes its file, then marks its existing
+metadata row deleted. The database row and screening references are retained.
+The storage adapter interface is independent of FastAPI and SQLAlchemy so a
+private S3-compatible implementation can be added later without changing the
+document lifecycle service.
 
 `src/resume_analyzer.py` composes existing functions:
 
@@ -90,9 +110,10 @@ and is not a public recruiter provisioning endpoint.
 The candidate API creates a `Candidate` and linked `Application` in one
 transaction for an already existing job. Screening-history reads use existing
 `ScreeningResult`, `ScreeningRequirementResult`, and skill relationships.
-There is intentionally no screening-write endpoint yet: the repository has no
-private document-storage service, and each `ScreeningResult` must reference a
-valid `ResumeDocument`.
+There is intentionally no screening-write endpoint yet: persistent screening
+must validate that a stored resume belongs to the application's candidate,
+check consent and authorization, and reference an exact job-description
+version before calling the existing analyzer.
 
 ### Frontend
 
@@ -114,30 +135,32 @@ must not be treated as the production classifier. `data/raw/` and
 `data/processed/` are local data/cache locations and are Git-ignored.
 
 `requirements.txt` includes FastAPI, Pydantic transitively, PyMuPDF,
-scikit-learn, Joblib, data/ML packages, and multipart support. It does **not**
-declare SQLAlchemy, Alembic, a PostgreSQL driver, or another database client.
+SQLAlchemy, Alembic, psycopg, scikit-learn, Joblib, data/ML packages, and
+multipart support.
 `frontend/package.json` declares React, Vite, Tailwind, and the React Vite
 plugin; no frontend database/auth client exists.
 
 Tests use Python `unittest` and FastAPI `TestClient`. Existing coverage
 includes PDF extraction, prediction, skill extraction, the decision policy,
-the API contract, candidate-report assembly, and in-memory background
-verification. There are no database, migration, persistence, authorization,
-or frontend automated-test modules at present.
+the API contract, database/migration behavior, candidate and job APIs, and
+in-memory background verification. Authentication and frontend automated
+tests are not implemented.
 
 ### Existing persistence and verification functionality
 
-No database connection, ORM, SQL schema, migration setup, or repository layer
-was found. `src/background_verification.py` stores claims in a Python list for
-the lifetime of a `BackgroundVerifier` instance. `src/candidate_report.py`
-combines prediction, skill analysis, and that verifier into a plain-text
-report. Neither module persists data between requests or process restarts.
-The verification code explicitly requires human review and keeps verification
-status independent from fit classification; retain that separation.
+The existing PostgreSQL/SQLAlchemy schema and initial Alembic migration
+already create recruiters, candidates, applications, consent records,
+`resume_documents`, and screening-result relationships. The private storage
+implementation uses those records; no duplicate tables or migration are
+needed. `src/background_verification.py` remains in-memory and is separate
+from the relational `VerificationRecord` model. The verification code
+requires human review and keeps verification status independent from fit
+classification; retain that separation.
 
-## 3. Proposed relational model
+## 3. Relational model and design choices
 
-### Design choices
+The initial migration already implements the core model. The following
+overview records the design choices and notes future considerations:
 
 - **Database:** PostgreSQL as the first durable store. It provides transactions,
   constraints, indexing, UUIDs, and JSONB for immutable model-output
@@ -168,8 +191,8 @@ The following is a logical schema, not executable migration SQL. `NOT NULL`,
 | `job_description_versions` | `id UUID PK`; `job_id UUID NOT NULL FK jobs`; `version INTEGER NOT NULL CHECK (version > 0)`; `description TEXT NOT NULL`; `created_by_recruiter_id UUID NOT NULL FK recruiters`; `created_at`; `UNIQUE(job_id, version)`. Published versions are immutable. |
 | `candidates` | `id UUID PK`; `display_name TEXT NOT NULL`; optional email/contact fields only when needed; `created_at`, `updated_at`, optional `anonymized_at`. Do not impose global uniqueness on candidate email by default: it creates identity/tenant privacy and account-linking problems. If matching is required, define a controlled, tenant-scoped normalized identifier policy. |
 | `applications` | `id UUID PK`; `candidate_id UUID NOT NULL FK candidates`; `job_id UUID NOT NULL FK jobs`; `status CHECK` (e.g. received/in_review/interview/offer/rejected/withdrawn/archived); `applied_at`, `created_at`, `updated_at`; optional `source`; `UNIQUE(job_id, candidate_id)` for one application row per candidate/job, with a defined reopen workflow. If repeat application rounds are required, add `round_number` and use `UNIQUE(job_id, candidate_id, round_number)`. |
-| `candidate_consents` | `id UUID PK`; `candidate_id UUID NOT NULL FK candidates`; optional `application_id UUID FK applications`; `purpose CHECK` (screening/document storage/background verification/contact); `status CHECK` (granted/withdrawn/expired); `captured_at`, `withdrawn_at`, optional `expires_at`; `notice_version`, `capture_method`, and minimal proof/reference. A consent event is append-only; do not overwrite a grant when consent is withdrawn. |
-| `resume_documents` | `id UUID PK`; `candidate_id UUID NOT NULL FK candidates`; `uploaded_by_recruiter_id UUID NOT NULL FK recruiters`; optional `consent_id UUID FK candidate_consents`; `storage_key TEXT NOT NULL UNIQUE`; `original_filename TEXT` (untrusted display metadata); `media_type`, `byte_size CHECK (byte_size > 0)`, scoped `sha256`, `status CHECK` (quarantined/available/deleted/expired), `uploaded_at`, optional `deleted_at` and `retention_until`. Store the binary in private object storage, not a database blob or public web directory. |
+| `consent_records` | `id UUID PK`; `candidate_id UUID NOT NULL FK candidates`; optional `application_id UUID FK applications`; `purpose CHECK` (screening/document storage/background verification/contact); `status CHECK` (granted/withdrawn/expired); `captured_at`, `withdrawn_at`, optional `expires_at`; `notice_version`, `capture_method`, and optional proof/reference. The upload service accepts only a candidate-matching, granted, non-withdrawn, non-expired document-storage consent. |
+| `resume_documents` | `id UUID PK`; `candidate_id UUID NOT NULL FK candidates`; `uploaded_by_recruiter_id UUID NOT NULL FK recruiters`; optional `consent_record_id UUID FK consent_records`; `storage_key TEXT NOT NULL UNIQUE`; `original_filename TEXT` (sanitized display metadata); `media_type`, `byte_size CHECK (byte_size > 0)`, `sha256`, `status CHECK` (quarantined/available/deleted/expired), `uploaded_at`, optional `deleted_at` and `retention_until`. The PDF binary is private filesystem data, not a database blob or public web file. |
 | `screening_results` | `id UUID PK`; `application_id UUID NOT NULL FK applications`; `resume_document_id UUID NOT NULL FK resume_documents`; `job_description_version_id UUID NOT NULL FK job_description_versions`; `run_number INTEGER NOT NULL CHECK (run_number > 0)`; `final_label CHECK` (Good Fit/Potential Fit/No Fit); `model_label CHECK` (same classes); `model_probabilities JSONB NOT NULL`; `decision_policy_version TEXT NOT NULL`; `model_artifact_version TEXT NOT NULL`; `decision_explanation TEXT`; `required_group_count`, `matched_required_group_count` with `0 <= matched <= total`; optional coverage ratio; `created_at`; `UNIQUE(application_id, run_number)`. Keep this as an immutable record of each run. |
 | `skills` | `id UUID PK`; `canonical_name TEXT NOT NULL UNIQUE`; optional `vocabulary_version` and active flag. Seed/maintain from the existing canonical skill vocabulary rather than adding a second parser. |
 | `job_requirement_groups` | `id UUID PK`; `job_description_version_id UUID NOT NULL FK job_description_versions`; `kind CHECK` (required/preferred); `ordinal INTEGER NOT NULL`; optional display text; `UNIQUE(job_description_version_id, kind, ordinal)`. Each alternative group (e.g. FastAPI OR Flask) is one row. |
@@ -189,7 +212,7 @@ job_requirement_groups * ── * skills (via job_requirement_options)
 
 candidates 1 ── * applications * ── 1 jobs
 candidates 1 ── * resume_documents
-candidates 1 ── * candidate_consents
+candidates 1 ── * consent_records
 applications 1 ── * screening_results
 screening_results * ── 1 resume_documents
 screening_results * ── 1 job_description_versions
@@ -312,13 +335,12 @@ async only if deployment and load requirements justify its extra complexity.
 
 ## 6. Migration strategy
 
-1. **Approve product and governance decisions:** PostgreSQL deployment,
+1. **Approve remaining product and governance decisions:** PostgreSQL deployment,
    tenant model, candidate consent language/purposes, access roles, retention
    periods, data residency, deletion/export requirements, and audit needs.
-2. **Add dependencies only after approval:** SQLAlchemy 2.x, Alembic, and a
-   PostgreSQL driver (for example psycopg). Pin compatible versions and add
-   test-only database support as needed. No dependency is installed or
-   required by this audit.
+2. **Maintain dependencies deliberately:** the current project already
+   declares SQLAlchemy 2.x, Alembic, and psycopg. Add future dependencies only
+   when a specific implementation requires them.
 3. **Configure database access:** load connection configuration from secret
    management/environment, enforce TLS and least-privilege DB credentials,
    establish health/readiness behavior, and ensure tests use an isolated
@@ -414,35 +436,30 @@ async only if deployment and load requirements justify its extra complexity.
 
 ## 9. Remaining implementation sequence
 
-1. Confirm PostgreSQL, single-tenant versus organization tenancy, consent
-   workflow, retention policy, and whether initial use is internal-only.
-2. Approve the schema and API boundary; specify user roles and ownership
-   rules before designing authentication.
-3. Before deployment, provision and validate an isolated PostgreSQL
-   integration-test database; only SQLite migration round-trips are covered
-   by the current ordinary test suite.
-4. Review and apply the initial migration in a new, explicitly selected
-   database after backup and migration-SQL review.
-5. Add authentication/authorization, consent enforcement, private object
-   storage, and its deletion lifecycle; add repository/service boundaries and
-   transaction tests.
-6. Add recruiter/job workflows and persistent application-scoped screening
-   writes while keeping `GET /api/health/` and stateless `POST /api/analyze/`
-   behavior unchanged.
-7. Persist screening snapshots and normalized requirement/skill evidence;
-   verify exact model probabilities and policy version round-trip.
-8. Add reviewer-managed verification persistence and append-only status
-   history, preserving the existing human-only semantics.
-9. Extend the frontend incrementally using the current layout and result
-   component; add API/UI tests and accessibility checks.
-10. Complete security, privacy, threat-model, retention, backup/restore, and
-    deployment reviews before production rollout.
+1. Define production authentication, recruiter ownership, tenancy, consent
+   withdrawal, retention, and audit requirements.
+2. Before deployment, provision an isolated PostgreSQL integration-test
+   environment and verify migration/backup/restore operations.
+3. Replace the development-only access guard with authenticated authorization;
+   never treat loopback binding as production authorization.
+4. Add persistent application-scoped screening with exact document and
+   job-description-version association. Reuse
+   `ResumeDocumentService.materialize_for_screening()` and the existing
+   `analyze_resume()` pipeline; persist immutable results and skill evidence.
+5. Add retention and consent-withdrawal operations, operational orphan-file
+   reconciliation, audit logging, and monitoring.
+6. Add a private S3-compatible adapter only when deployment requires it; keep
+   provider credentials in managed secrets and avoid public object URLs.
+7. Complete security, privacy, threat-model, retention, backup/restore, and
+   deployment reviews before production rollout.
 
 ## 10. Decision and open questions
 
-The infrastructure uses PostgreSQL, SQLAlchemy, and Alembic. Candidate and
-application persistence is available; screening writes and PostgreSQL
-connectivity were not verified in this implementation. The following
+The infrastructure uses PostgreSQL, SQLAlchemy, Alembic, and existing
+candidate, application, consent, and resume-document records. The initial
+migration already contains the required resume and screening relationships;
+no migration was needed. Resume storage currently uses a private local
+filesystem adapter and has no screening-write endpoint. The following
 workflow and policy decisions remain open:
 
 - single recruiter workspace versus organization/tenant support;
@@ -452,14 +469,15 @@ workflow and policy decisions remain open:
 - consent and lawful-basis requirements for screening, document retention,
   and background verification;
 - retention periods and deletion/anonymization obligations;
-- private object-storage provider, region, malware scanning, and access
+- production object-storage provider, region, malware scanning, and access
   controls;
 - authentication provider, roles, and audit requirements;
 - which screening evidence must be queryable versus retained only in the
   immutable response snapshot.
 
-The ORM and candidate endpoints are still a foundation: authentication,
-authorization, consent enforcement, private document storage, retention jobs,
-and screening writes remain unimplemented. Do not expose candidate endpoints
-on an untrusted network until access controls and consent/retention policies
-are in place.
+The resume API enforces document-storage consent but does not implement
+authentication, recruiter ownership authorization for general API routes,
+retention jobs, or persistent screening writes. Its explicit development
+guard is not production-ready. Do not expose candidate or resume endpoints on
+an untrusted network until access controls and consent/retention policies are
+in place.

@@ -238,6 +238,18 @@ class ResumeDocumentCreate(BaseModel):
     retention_until: datetime | None = None
 
 
+class ResumeDocumentRead(ORMModel):
+    id: UUID
+    candidate_id: UUID
+    original_filename: str
+    media_type: str
+    byte_size: int
+    status: DocumentStatus
+    uploaded_at: datetime
+    deleted_at: datetime | None
+    retention_until: datetime | None
+
+
 class ScreeningResultCreate(BaseModel):
     application_id: UUID
     resume_document_id: UUID
@@ -317,6 +329,7 @@ __all__ = [
     "JobDescriptionVersionCreate",
     "RecruiterCreate",
     "ResumeDocumentCreate",
+    "ResumeDocumentRead",
     "ScreeningEvidenceCreate",
     "ScreeningResultCreate",
     "ScreeningHistoryRead",

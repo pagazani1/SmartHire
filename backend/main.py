@@ -1,16 +1,31 @@
 """FastAPI endpoints for SmartHire resume analysis."""
 
+import ipaddress
+import os
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
+from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
+from starlette.responses import StreamingResponse
 
 from backend.db.models import (
     Application,
@@ -21,6 +36,7 @@ from backend.db.models import (
     JobRequirementOption,
     Recruiter,
     RequirementKind,
+    ResumeDocument,
     Skill,
     ScreeningRequirementResult,
     ScreeningResult,
@@ -35,8 +51,21 @@ from backend.schemas import (
     JobCreate,
     JobRead,
     JobUpdate,
+    ResumeDocumentRead,
     ScreeningHistoryRead,
 )
+from backend.services.resume_documents import (
+    CandidateNotFoundError,
+    DevelopmentRecruiterError,
+    InvalidConsentError,
+    ResumeDatabaseError,
+    ResumeDocumentService,
+    ResumeNotFoundError,
+    ResumeStorageUnavailableError,
+    ResumeUploadError,
+)
+from backend.storage.adapter import StorageError
+from backend.storage.local_filesystem import LocalFilesystemStorage
 from predict import validate_text_input
 from src.pdf_extractor import PDFExtractionError
 from src.resume_analyzer import analyze_resume
@@ -152,6 +181,75 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="SmartHire API", lifespan=lifespan)
+
+
+def require_resume_management_access(request: Request) -> None:
+    """Limit this unauthenticated milestone to explicitly enabled loopback use."""
+    development_mode = os.getenv("SMART_HIRE_DEVELOPMENT_MODE", "").strip().casefold()
+    if development_mode not in {"1", "true", "yes"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Resume management is available only in configured development mode.",
+        )
+    client_host = request.client.host if request.client is not None else ""
+    try:
+        is_loopback = ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if not is_loopback:
+        raise HTTPException(
+            status_code=403,
+            detail="Resume management is restricted to loopback clients.",
+        )
+
+
+def _resume_service() -> ResumeDocumentService:
+    try:
+        storage = LocalFilesystemStorage()
+    except StorageError:
+        raise HTTPException(
+            status_code=503,
+            detail="Private resume storage is unavailable.",
+        ) from None
+    return ResumeDocumentService(storage)
+
+
+def _configured_development_recruiter_id() -> UUID:
+    recruiter_value = os.getenv("SMART_HIRE_DEVELOPMENT_RECRUITER_ID", "").strip()
+    try:
+        return UUID(recruiter_value)
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(
+            status_code=503,
+            detail="A valid development recruiter identity is not configured.",
+        ) from None
+
+
+def _resume_http_error(error: Exception) -> HTTPException:
+    if isinstance(error, CandidateNotFoundError):
+        return HTTPException(status_code=404, detail=str(error))
+    if isinstance(error, ResumeNotFoundError):
+        return HTTPException(status_code=404, detail=str(error))
+    if isinstance(error, InvalidConsentError):
+        return HTTPException(status_code=403, detail=str(error))
+    if isinstance(error, DevelopmentRecruiterError):
+        return HTTPException(status_code=503, detail=str(error))
+    if isinstance(error, ResumeUploadError):
+        return HTTPException(status_code=error.status_code, detail=str(error))
+    if isinstance(error, ResumeStorageUnavailableError):
+        return HTTPException(status_code=503, detail=str(error))
+    if isinstance(error, ResumeDatabaseError):
+        return HTTPException(status_code=500, detail=str(error))
+    if isinstance(error, SQLAlchemyError):
+        return HTTPException(
+            status_code=500,
+            detail="Unable to complete the resume database operation.",
+        )
+    return HTTPException(status_code=500, detail="Resume operation failed.")
+
+
+def _resume_response(document: ResumeDocument) -> ResumeDocumentRead:
+    return ResumeDocumentRead.model_validate(document)
 
 
 class AnalysisResponse(BaseModel):
@@ -559,6 +657,159 @@ def get_candidate_screenings(
             )
         )
     return history
+
+
+@app.post(
+    "/api/candidates/{candidate_id}/resumes/",
+    response_model=ResumeDocumentRead,
+    status_code=status.HTTP_201_CREATED,
+    tags=["resumes"],
+    summary="Upload a private resume document",
+    dependencies=[Depends(require_resume_management_access)],
+)
+def upload_resume(
+    candidate_id: UUID,
+    file: Annotated[UploadFile, File(description="PDF resume")],
+    consent_record_id: Annotated[UUID, Form()],
+    db: Annotated[Session, Depends(get_db)],
+) -> ResumeDocumentRead:
+    """Validate consent and store a private PDF with metadata only in the database."""
+    try:
+        service = _resume_service()
+        recruiter_id = _configured_development_recruiter_id()
+        document = service.upload(
+            db=db,
+            candidate_id=candidate_id,
+            consent_id=consent_record_id,
+            recruiter_id=recruiter_id,
+            source=file.file,
+            filename=file.filename,
+            media_type=file.content_type,
+        )
+    except (
+        CandidateNotFoundError,
+        DevelopmentRecruiterError,
+        InvalidConsentError,
+        ResumeDatabaseError,
+        ResumeStorageUnavailableError,
+        ResumeUploadError,
+        SQLAlchemyError,
+    ) as exc:
+        raise _resume_http_error(exc) from None
+    finally:
+        file.file.close()
+    return _resume_response(document)
+
+
+@app.get(
+    "/api/candidates/{candidate_id}/resumes/",
+    response_model=list[ResumeDocumentRead],
+    tags=["resumes"],
+    summary="List a candidate's private resume metadata",
+    dependencies=[Depends(require_resume_management_access)],
+)
+def list_candidate_resumes(
+    candidate_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[ResumeDocumentRead]:
+    try:
+        documents = ResumeDocumentService.list_for_candidate(
+            db, candidate_id, limit, offset
+        )
+    except (CandidateNotFoundError, SQLAlchemyError) as exc:
+        raise _resume_http_error(exc) from None
+    return [_resume_response(document) for document in documents]
+
+
+@app.get(
+    "/api/resumes/{resume_id}",
+    response_model=ResumeDocumentRead,
+    tags=["resumes"],
+    summary="Get private resume metadata",
+    dependencies=[Depends(require_resume_management_access)],
+)
+def get_resume_metadata(
+    resume_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> ResumeDocumentRead:
+    try:
+        document = ResumeDocumentService.get_metadata(db, resume_id)
+    except (ResumeNotFoundError, SQLAlchemyError) as exc:
+        raise _resume_http_error(exc) from None
+    return _resume_response(document)
+
+
+@app.get(
+    "/api/resumes/{resume_id}/download",
+    tags=["resumes"],
+    summary="Download a private resume",
+    dependencies=[Depends(require_resume_management_access)],
+)
+def download_resume(
+    resume_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> StreamingResponse:
+    service = _resume_service()
+    try:
+        document, stored_file = service.open_download(db, resume_id)
+    except (
+        ResumeNotFoundError,
+        ResumeStorageUnavailableError,
+        InvalidConsentError,
+        SQLAlchemyError,
+    ) as exc:
+        raise _resume_http_error(exc) from None
+
+    def stream_file():
+        try:
+            while True:
+                chunk = stored_file.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            stored_file.close()
+
+    encoded_filename = quote(document.original_filename, safe="")
+    return StreamingResponse(
+        stream_file(),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="resume.pdf"; '
+                f"filename*=UTF-8''{encoded_filename}"
+            ),
+            "Content-Length": str(document.byte_size),
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.delete(
+    "/api/resumes/{resume_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["resumes"],
+    summary="Soft-delete a private resume and remove its file",
+    dependencies=[Depends(require_resume_management_access)],
+)
+def delete_resume(
+    resume_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> Response:
+    service = _resume_service()
+    try:
+        service.delete(db, resume_id)
+    except (
+        ResumeNotFoundError,
+        ResumeDatabaseError,
+        ResumeStorageUnavailableError,
+        SQLAlchemyError,
+    ) as exc:
+        raise _resume_http_error(exc) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/api/analyze/", response_model=AnalysisResponse)

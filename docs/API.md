@@ -142,9 +142,88 @@ original model classification and probabilities, decision-policy version and
 explanation, required skill evidence, and coverage counts.
 
 Analyses submitted to `POST /api/analyze/` do not appear in this history: that
-legacy endpoint remains stateless. Persistent screening writes are deferred
-until private document storage is selected and implemented. Returns `404`
-when the candidate does not exist.
+legacy endpoint remains stateless. Persistent screening writes are not
+implemented yet. Returns `404` when the candidate does not exist.
+
+## Private resume documents (development only)
+
+Resume-document routes require `SMART_HIRE_DEVELOPMENT_MODE=true`, a valid
+active recruiter UUID in `SMART_HIRE_DEVELOPMENT_RECRUITER_ID`, and a loopback
+client connection. Run the server bound to `127.0.0.1`; this guard is a
+development restriction, **not authentication or recruiter ownership
+authorization**. Do not expose these routes to untrusted networks or deploy
+this configuration in production.
+
+Uploads require an existing candidate and a consent record for that same
+candidate with purpose `document_storage`, status `granted`, no withdrawal
+timestamp, and no expired `expires_at`. The recruiter ID is taken from server
+configuration, never from the request. Files are limited to 10 MiB. A `.pdf`
+extension and PDF-compatible MIME type are hints only; the server also checks
+the PDF signature, parseability, page count, and encryption. Encrypted PDFs
+are rejected. Valid scanned PDFs can be stored, but the existing analyzer
+does not provide OCR. This milestone does not add a consent-capture endpoint;
+the record must already have been captured through an approved workflow.
+
+### `POST /api/candidates/{candidate_id}/resumes/`
+
+Submit `multipart/form-data` with:
+
+- `file`: PDF resume
+- `consent_record_id`: UUID of an active document-storage consent
+
+Returns `201 Created` with metadata only:
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000001",
+  "candidate_id": "00000000-0000-4000-8000-000000000002",
+  "original_filename": "resume.pdf",
+  "media_type": "application/pdf",
+  "byte_size": 12345,
+  "status": "available",
+  "uploaded_at": "2026-11-12T12:00:00Z",
+  "deleted_at": null,
+  "retention_until": null
+}
+```
+
+The response does not include the storage key or filesystem path. Returns
+`404` for an unknown candidate, `403` for missing/invalid consent, `413` when
+the streamed upload exceeds 10 MiB, `415` for a non-PDF filename or
+incompatible media type, `422` for empty/invalid/encrypted PDF data, and
+sanitized `500`/`503` errors for database or storage failures.
+
+### `GET /api/candidates/{candidate_id}/resumes/`
+
+Returns resume metadata newest first, excluding soft-deleted documents by
+default. Accepts `limit` (default `50`, range `1`–`100`) and `offset`
+(default `0`). Returns `404` for an unknown candidate.
+
+### `GET /api/resumes/{resume_id}`
+
+Returns metadata only, including for a soft-deleted record. It never returns
+a storage key, absolute path, or public URL.
+
+### `GET /api/resumes/{resume_id}/download`
+
+Streams an available PDF through the backend with an attachment filename and
+`Cache-Control: private, no-store`. Deleted, quarantined, expired, or
+unavailable files cannot be downloaded. No public object URL is created.
+
+### `DELETE /api/resumes/{resume_id}`
+
+Returns `204 No Content` after deleting the private file and retaining the
+database metadata row with status `deleted` and `deleted_at`. Screening-result
+foreign keys and historical metadata are preserved. The document is first
+made unavailable; if physical deletion fails, it remains quarantined so a
+later retry can complete deletion. If the file is removed but the final
+database update fails, retrying is safe.
+
+The database and filesystem cannot participate in one atomic transaction.
+Upload compensates for metadata persistence failures by attempting to delete
+the stored object. A failed compensation may leave an orphan; an internal
+reconciliation operation can identify storage keys without database metadata.
+There is no public cleanup endpoint.
 
 ## Existing stateless analysis
 

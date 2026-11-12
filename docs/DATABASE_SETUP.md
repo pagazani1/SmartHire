@@ -1,9 +1,10 @@
 # SmartHire Database Setup (Local Development)
 
-This guide configures the initial SQLAlchemy/Alembic foundation. The existing
-`POST /api/analyze/` endpoint remains stateless: adding this infrastructure
-does not store candidates, documents, or screening results. Do not use real
-candidate data in local development.
+This guide configures the SQLAlchemy/Alembic foundation and private
+resume-document storage. The existing `POST /api/analyze/` endpoint remains
+stateless; the separate document-management API stores private PDF files and
+metadata but does not persist screening results. Do not use real candidate
+data in local development.
 
 ## 1. Install PostgreSQL on Windows
 
@@ -54,7 +55,39 @@ Environment variables already set in the process take precedence over `.env`.
 The engine is created lazily, so imports and the legacy analysis endpoint do
 not require a configured database.
 
-## 3. Install Python dependencies
+## 3. Configure private resume storage
+
+The local adapter stores PDFs outside the repository and all static/public
+directories. By default it uses the per-user application data directory on
+Windows and `~/.local/share/smarthire/private-resumes` on other platforms.
+Set `SMART_HIRE_RESUME_STORAGE_ROOT` only to a private directory outside the
+repository if a different location is needed. The service uses opaque random
+UUID keys; the original filename is metadata only.
+
+Resume-management routes are disabled unless `SMART_HIRE_DEVELOPMENT_MODE`
+is explicitly set to `true`. Set `SMART_HIRE_DEVELOPMENT_RECRUITER_ID` to the
+UUID of an existing active development recruiter, created with the
+development seed command documented in [API.md](./API.md). These settings do
+not implement authentication or recruiter ownership authorization. The
+development-only endpoints must not be exposed to untrusted networks.
+
+Start the backend bound to loopback:
+
+```powershell
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+Resume uploads are limited to 10 MiB and require active `document_storage`
+consent for the same candidate. This milestone does not create consent
+records; they must already have been captured through an approved workflow.
+PostgreSQL stores metadata only; PDF bytes remain in private filesystem
+storage. Deletion retains the metadata row and screening references while
+physically removing the file. If storage and database operations diverge,
+uploads attempt compensating cleanup and deletions remain retryable; inspect
+the operational logs and reconcile unreferenced storage objects before any
+production use.
+
+## 4. Install Python dependencies
 
 Activate the project's virtual environment, then install the requirements:
 
@@ -67,7 +100,7 @@ The database foundation uses SQLAlchemy 2.x, Alembic, `psycopg[binary]`, and
 `python-dotenv`. The binary psycopg extra is convenient for local Windows
 development; review production driver/build policy separately.
 
-## 4. Create or inspect the schema
+## 5. Create or inspect the schema
 
 First inspect the migration plan and current database state. The migration
 does not drop existing tables, but it is intended for a new SmartHire schema.
@@ -96,7 +129,7 @@ python -m alembic downgrade base
 Do not run downgrade against a database containing records you need; it drops
 the initial schema tables.
 
-## 5. Check connectivity
+## 6. Check connectivity
 
 After setting `.env`, verify the connection without printing credentials:
 
@@ -107,7 +140,7 @@ python -c "from sqlalchemy import text; from backend.db.session import get_engin
 Expected output is `1`. This confirms the configured database accepts a
 connection; it does not verify backup, access-control, or production readiness.
 
-## 6. Run tests
+## 7. Run tests
 
 Ordinary database infrastructure tests use temporary SQLite databases and do
 not require a running PostgreSQL server or a production database URL:
