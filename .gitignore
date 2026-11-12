@@ -57,6 +57,7 @@ data/processed/
 # Secrets, API tokens, credentials
 .env
 *.env
+.env.*
 secrets.yaml
 secrets.json
 credentials.json
@@ -88,6 +89,7 @@ $RECYCLE.BIN/
 # ----------------------------------------------------------
 # Build / distribution artefacts
 # ----------------------------------------------------------
+node_modules/
 dist/
 build/
 *.egg-info/
@@ -118,4 +120,4 @@ coverage.xml
 *.temp
 *.bak
 *.orig
-evaluation_results/predictions.csv
+predictions.csv

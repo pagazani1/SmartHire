@@ -86,6 +86,15 @@ class TestSmartHireAPI(unittest.TestCase):
         analyzer_result = {
             "label": "Potential Fit",
             "probs": {"Good Fit": 0.1, "No Fit": 0.2, "Potential Fit": 0.7},
+            "model_label": "Potential Fit",
+            "model_probs": {
+                "Good Fit": 0.1,
+                "No Fit": 0.2,
+                "Potential Fit": 0.7,
+            },
+            "decision_policy": "required_skill_group_coverage_v1",
+            "decision_explanation": "Synthetic policy explanation.",
+            "decision_evidence": {"structured_evidence_available": True},
             "resume_skills": ["Python"],
             "matched_skills": ["Python"],
             "missing_skills": ["AWS"],

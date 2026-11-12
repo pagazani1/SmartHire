@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from predict import load_artifacts, predict, validate_text_input
+from src.decision_policy import apply_decision_policy
 from src.pdf_extractor import PDFExtractionError, extract_text_from_pdf
 from src.skill_extractor import analyse_skills
 
@@ -10,9 +11,10 @@ from src.skill_extractor import analyse_skills
 def analyze_resume(pdf_path: str | Path, jd_text: object) -> dict:
     """Extract a PDF resume and analyze it against a job description.
 
-    The returned dictionary contains the unchanged model prediction fields
-    (`label` and `probs`), the legacy skill lists, and additive skill evidence
-    and coverage fields. Raw resume text is not returned or printed.
+    The returned ``label`` is the recruiter-facing policy decision.
+    ``model_label`` and ``model_probs`` preserve the unchanged text-model
+    result; ``probs`` remains an alias for those original probabilities.
+    Raw resume text is not returned or printed.
 
     Raises:
         ValueError: The job description is not a non-empty string.
@@ -26,12 +28,12 @@ def analyze_resume(pdf_path: str | Path, jd_text: object) -> dict:
     validated_jd = validate_text_input(jd_text, "Job description")
     resume_text = extract_text_from_pdf(pdf_path)
     vectorizer, model = load_artifacts()
-    prediction = predict(resume_text, validated_jd, vectorizer, model)
+    model_prediction = predict(resume_text, validated_jd, vectorizer, model)
     skills = analyse_skills(resume_text, validated_jd)
+    decision = apply_decision_policy(model_prediction, skills)
 
     return {
-        "label": prediction["label"],
-        "probs": prediction["probs"],
+        **decision,
         "resume_skills": sorted(skills["resume_skills"]),
         "matched_skills": sorted(skills["matched_skills"]),
         "missing_skills": sorted(skills["missing_skills"]),

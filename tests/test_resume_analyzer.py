@@ -87,11 +87,18 @@ class TestAnalyzeResume(unittest.TestCase):
             vectorizer.transformed_texts,
             ["synthetic python developer with docker experience. seeking a python engineer with aws and docker."],
         )
-        self.assertEqual(result["label"], "Potential Fit")
+        self.assertEqual(result["label"], "Good Fit")
+        self.assertEqual(result["model_label"], "Potential Fit")
         self.assertEqual(
             result["probs"],
             {"Good Fit": 0.1, "No Fit": 0.2, "Potential Fit": 0.7},
         )
+        self.assertEqual(result["model_probs"], result["probs"])
+        self.assertEqual(
+            result["decision_evidence"]["matched_required_skill_groups"],
+            [["Python"]],
+        )
+        self.assertIn("keyword evidence", result["decision_explanation"])
         self.assertEqual(result["resume_skills"], ["Docker", "Python"])
         self.assertEqual(result["matched_skills"], ["Docker", "Python"])
         self.assertEqual(result["missing_skills"], ["AWS"])
@@ -178,6 +185,65 @@ class TestAnalyzeResume(unittest.TestCase):
         self.assertEqual(result["resume_skills"], ["Docker", "Python"])
         self.assertIn("Python", result["matched_skills"])
         self.assertIn("Kubernetes", result["missing_skills"])
+
+    @unittest.skipUnless(
+        config.TFIDF_VECTORIZER_PATH.exists()
+        and config.LOGISTIC_REGRESSION_PATH.exists()
+        and all(
+            (config.BASE_DIR / "test_resumes" / f"SmartHire_{case}_Match_Resume.pdf").exists()
+            for case in ("Strong", "Partial", "Weak")
+        ),
+        "Production model artifacts or synthetic resume fixtures are unavailable.",
+    )
+    def test_decision_policy_on_all_synthetic_match_levels(self):
+        jd_text = (
+            "Python Backend Developer Intern\n"
+            "Required Skills:\n"
+            "- Python\n"
+            "- FastAPI or Flask\n"
+            "- REST APIs\n"
+            "- SQL\n"
+            "- SQLite\n"
+            "- Pandas\n"
+            "- NumPy\n"
+            "- scikit-learn\n"
+            "- Git\n"
+            "- GitHub\n"
+            "- machine learning\n"
+            "- text classification"
+        )
+        expected = {
+            "Strong": ("Good Fit", 12, 12),
+            "Partial": ("Potential Fit", 4, 12),
+            "Weak": ("No Fit", 0, 12),
+        }
+        with (
+            patch("predict.VECTORIZER_PATH", str(config.TFIDF_VECTORIZER_PATH)),
+            patch("predict.MODEL_PATH", str(config.LOGISTIC_REGRESSION_PATH)),
+        ):
+            for case, (label, matched_count, required_count) in expected.items():
+                with self.subTest(case=case):
+                    pdf_path = (
+                        config.BASE_DIR
+                        / "test_resumes"
+                        / f"SmartHire_{case}_Match_Resume.pdf"
+                    )
+                    result = analyze_resume(pdf_path, jd_text)
+                    self.assertEqual(result["label"], label)
+                    self.assertEqual(result["model_probs"], result["probs"])
+                    self.assertAlmostEqual(sum(result["model_probs"].values()), 1.0)
+                    evidence = result["decision_evidence"]
+                    self.assertEqual(
+                        evidence["matched_required_group_count"], matched_count
+                    )
+                    self.assertEqual(
+                        evidence["required_skill_group_count"], required_count
+                    )
+                    self.assertEqual(
+                        evidence["missing_required_group_count"],
+                        required_count - matched_count,
+                    )
+                    self.assertTrue(evidence["structured_evidence_available"])
 
 
 if __name__ == "__main__":

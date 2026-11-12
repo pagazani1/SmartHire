@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
@@ -18,6 +18,11 @@ app = FastAPI(title="SmartHire API")
 class AnalysisResponse(BaseModel):
     label: str
     probs: dict[str, float]
+    model_label: str | None = None
+    model_probs: dict[str, float] = Field(default_factory=dict)
+    decision_policy: str | None = None
+    decision_explanation: str | None = None
+    decision_evidence: dict[str, Any] = Field(default_factory=dict)
     resume_skills: list[str]
     matched_skills: list[str]
     missing_skills: list[str]
