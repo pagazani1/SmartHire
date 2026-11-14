@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import create_engine, event, func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, configure_mappers, sessionmaker
 
@@ -162,6 +162,397 @@ class TestDatabaseDependency(unittest.TestCase):
 
 
 class TestAlembicConfiguration(unittest.TestCase):
+    def test_requirement_snapshot_migration_preserves_legacy_rows_and_guards_downgrade(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "requirement-snapshots.sqlite"
+            database_url = f"sqlite:///{database_path.as_posix()}"
+            config = Config(str(PROJECT_ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+            screening_result_id = uuid4().hex
+            requirement_group_id = uuid4().hex
+
+            with patch.dict(os.environ, {"DATABASE_URL": database_url}):
+                command.upgrade(config, "7b31f0d9c4a2")
+
+                engine = create_engine(database_url)
+                try:
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "INSERT INTO screening_requirement_results "
+                                "(screening_result_id, requirement_group_id, matched) "
+                                "VALUES (:screening_result_id, :requirement_group_id, 1)"
+                            ),
+                            {
+                                "screening_result_id": screening_result_id,
+                                "requirement_group_id": requirement_group_id,
+                            },
+                        )
+                finally:
+                    engine.dispose()
+
+                command.upgrade(config, "head")
+
+                engine = create_engine(database_url)
+                try:
+                    with engine.begin() as connection:
+                        columns = {
+                            column["name"]: column
+                            for column in inspect(connection).get_columns(
+                                "screening_requirement_results"
+                            )
+                        }
+                        self.assertTrue(columns["requirement_group_id"]["nullable"])
+                        self.assertTrue(columns["requirement_snapshot"]["nullable"])
+                        self.assertFalse(columns["id"]["nullable"])
+
+                        legacy = connection.execute(
+                            text(
+                                "SELECT id, screening_result_id, requirement_group_id, "
+                                "requirement_snapshot FROM screening_requirement_results"
+                            )
+                        ).one()
+                        self.assertIsNotNone(legacy.id)
+                        self.assertEqual(legacy.screening_result_id, screening_result_id)
+                        self.assertEqual(legacy.requirement_group_id, requirement_group_id)
+                        self.assertIsNone(legacy.requirement_snapshot)
+
+                        structured_snapshot = (
+                            '{"canonical_identifier":"'
+                            + requirement_group_id
+                            + '","name":"Python","kind":"required",'
+                            '"skills":["Python"],"source":"structured"}'
+                        )
+                        connection.execute(
+                            text(
+                                "UPDATE screening_requirement_results "
+                                "SET requirement_snapshot = :snapshot "
+                                "WHERE screening_result_id = :screening_result_id "
+                                "AND requirement_group_id = :requirement_group_id"
+                            ),
+                            {
+                                "snapshot": structured_snapshot,
+                                "screening_result_id": screening_result_id,
+                                "requirement_group_id": requirement_group_id,
+                            },
+                        )
+                        stored_structured = connection.execute(
+                            text(
+                                "SELECT requirement_snapshot "
+                                "FROM screening_requirement_results "
+                                "WHERE requirement_group_id = :requirement_group_id"
+                            ),
+                            {"requirement_group_id": requirement_group_id},
+                        ).scalar_one()
+                        self.assertIn('"source":"structured"', stored_structured)
+                        with self.assertRaises(IntegrityError):
+                            connection.execute(
+                                text(
+                                    "INSERT INTO screening_requirement_results "
+                                    "(id, screening_result_id, requirement_group_id, matched) "
+                                    "VALUES (:id, :screening_result_id, "
+                                    ":requirement_group_id, 0)"
+                                ),
+                                {
+                                    "id": str(uuid4()),
+                                    "screening_result_id": screening_result_id,
+                                    "requirement_group_id": requirement_group_id,
+                                },
+                            )
+
+                        fallback_snapshot = (
+                            '{"canonical_identifier":"jd-required-0",'
+                            '"name":"Python or Java","kind":"required",'
+                            '"skills":["Python","Java"],'
+                            '"source":"jd_text_fallback"}'
+                        )
+                        connection.execute(
+                            text(
+                                "INSERT INTO screening_requirement_results "
+                                "(id, screening_result_id, requirement_group_id, "
+                                "requirement_snapshot, matched) VALUES "
+                                "(:id, :screening_result_id, NULL, :snapshot, 0)"
+                            ),
+                            {
+                                "id": str(uuid4()),
+                                "screening_result_id": screening_result_id,
+                                "snapshot": fallback_snapshot,
+                            },
+                        )
+                        fallback = connection.execute(
+                            text(
+                                "SELECT requirement_group_id, requirement_snapshot "
+                                "FROM screening_requirement_results "
+                                "WHERE requirement_group_id IS NULL"
+                            )
+                        ).one()
+                        self.assertIsNone(fallback.requirement_group_id)
+                        self.assertIn('"source":"jd_text_fallback"', fallback.requirement_snapshot)
+                        foreign_keys = inspect(connection).get_foreign_keys(
+                            "screening_requirement_results"
+                        )
+                        self.assertTrue(
+                            any(
+                                foreign_key["constrained_columns"]
+                                == ["requirement_group_id"]
+                                and foreign_key["referred_table"] == "job_requirement_groups"
+                                for foreign_key in foreign_keys
+                            )
+                        )
+                finally:
+                    engine.dispose()
+
+                with self.assertRaisesRegex(RuntimeError, "Cannot downgrade"):
+                    command.downgrade(config, "7b31f0d9c4a2")
+
+                engine = create_engine(database_url)
+                try:
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "DELETE FROM screening_requirement_results "
+                                "WHERE requirement_group_id IS NULL"
+                            )
+                        )
+                finally:
+                    engine.dispose()
+
+                with self.assertRaisesRegex(RuntimeError, "Cannot downgrade"):
+                    command.downgrade(config, "7b31f0d9c4a2")
+
+                engine = create_engine(database_url)
+                try:
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "UPDATE screening_requirement_results "
+                                "SET requirement_snapshot = NULL"
+                            )
+                        )
+                finally:
+                    engine.dispose()
+
+                command.downgrade(config, "7b31f0d9c4a2")
+                engine = create_engine(database_url)
+                try:
+                    with engine.connect() as connection:
+                        columns = {
+                            column["name"]
+                            for column in inspect(connection).get_columns(
+                                "screening_requirement_results"
+                            )
+                        }
+                        self.assertNotIn("id", columns)
+                        self.assertNotIn("requirement_snapshot", columns)
+                        legacy = connection.execute(
+                            text(
+                                "SELECT screening_result_id, requirement_group_id "
+                                "FROM screening_requirement_results"
+                            )
+                        ).one()
+                        self.assertEqual(legacy.screening_result_id, screening_result_id)
+                        self.assertEqual(legacy.requirement_group_id, requirement_group_id)
+                        primary_key = inspect(connection).get_pk_constraint(
+                            "screening_requirement_results"
+                        )
+                        self.assertEqual(
+                            primary_key["constrained_columns"],
+                            ["screening_result_id", "requirement_group_id"],
+                        )
+                finally:
+                    engine.dispose()
+
+    def test_screening_idempotency_migration_preserves_legacy_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "screening-idempotency.sqlite"
+            database_url = f"sqlite:///{database_path.as_posix()}"
+            config = Config(str(PROJECT_ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+
+            with patch.dict(os.environ, {"DATABASE_URL": database_url}):
+                command.upgrade(config, "c68042771911")
+                legacy_ids = {
+                    "id": str(uuid4()),
+                    "application_id": str(uuid4()),
+                    "resume_document_id": str(uuid4()),
+                    "job_description_version_id": str(uuid4()),
+                }
+                engine = create_engine(database_url)
+                try:
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "INSERT INTO screening_results ("
+                                "id, application_id, resume_document_id, "
+                                "job_description_version_id, run_number, final_label, "
+                                "model_label, model_probabilities, "
+                                "decision_policy_version, model_artifact_version, "
+                                "required_group_count, matched_required_group_count"
+                                ") VALUES ("
+                                ":id, :application_id, :resume_document_id, "
+                                ":job_description_version_id, 1, 'No Fit', 'No Fit', "
+                                "'{\"No Fit\": 1.0}', 'legacy-policy', 'legacy-model', 0, 0"
+                                ")"
+                            ),
+                            legacy_ids,
+                        )
+                finally:
+                    engine.dispose()
+
+                command.upgrade(config, "head")
+
+                engine = create_engine(database_url)
+                try:
+                    with engine.begin() as connection:
+                        columns = {
+                            column["name"]: column
+                            for column in inspect(connection).get_columns(
+                                "screening_results"
+                            )
+                        }
+                        self.assertTrue(columns["idempotency_key"]["nullable"])
+                        legacy_record = connection.execute(
+                            text(
+                                "SELECT idempotency_key FROM screening_results "
+                                "WHERE id = :id"
+                            ),
+                            {"id": legacy_ids["id"]},
+                        ).one()
+                        self.assertIsNone(legacy_record.idempotency_key)
+
+                        second_legacy_record = {
+                            **legacy_ids,
+                            "id": str(uuid4()),
+                        }
+                        connection.execute(
+                            text(
+                                "INSERT INTO screening_results ("
+                                "id, application_id, resume_document_id, "
+                                "job_description_version_id, run_number, final_label, "
+                                "model_label, model_probabilities, "
+                                "decision_policy_version, model_artifact_version, "
+                                "required_group_count, matched_required_group_count"
+                                ") VALUES ("
+                                ":id, :application_id, :resume_document_id, "
+                                ":job_description_version_id, 2, 'No Fit', 'No Fit', "
+                                "'{\"No Fit\": 1.0}', 'legacy-policy', 'legacy-model', 0, 0"
+                                ")"
+                            ),
+                            second_legacy_record,
+                        )
+                        null_key_count = connection.execute(
+                            text(
+                                "SELECT COUNT(*) FROM screening_results "
+                                "WHERE application_id = :application_id "
+                                "AND idempotency_key IS NULL"
+                            ),
+                            {"application_id": legacy_ids["application_id"]},
+                        ).scalar_one()
+                        self.assertEqual(null_key_count, 2)
+
+                        keyed_record = {
+                            **legacy_ids,
+                            "id": str(uuid4()),
+                            "run_number": 3,
+                            "idempotency_key": "request-key",
+                        }
+                        connection.execute(
+                            text(
+                                "INSERT INTO screening_results ("
+                                "id, application_id, resume_document_id, "
+                                "job_description_version_id, run_number, final_label, "
+                                "model_label, model_probabilities, "
+                                "decision_policy_version, model_artifact_version, "
+                                "required_group_count, matched_required_group_count, "
+                                "idempotency_key"
+                                ") VALUES ("
+                                ":id, :application_id, :resume_document_id, "
+                                ":job_description_version_id, :run_number, 'No Fit', "
+                                "'No Fit', '{\"No Fit\": 1.0}', 'test-policy', "
+                                "'test-model', 0, 0, :idempotency_key"
+                                ")"
+                            ),
+                            keyed_record,
+                        )
+                        other_application_record = {
+                            **keyed_record,
+                            "id": str(uuid4()),
+                            "application_id": str(uuid4()),
+                            "run_number": 1,
+                        }
+                        connection.execute(
+                            text(
+                                "INSERT INTO screening_results ("
+                                "id, application_id, resume_document_id, "
+                                "job_description_version_id, run_number, final_label, "
+                                "model_label, model_probabilities, "
+                                "decision_policy_version, model_artifact_version, "
+                                "required_group_count, matched_required_group_count, "
+                                "idempotency_key"
+                                ") VALUES ("
+                                ":id, :application_id, :resume_document_id, "
+                                ":job_description_version_id, :run_number, 'No Fit', "
+                                "'No Fit', '{\"No Fit\": 1.0}', 'test-policy', "
+                                "'test-model', 0, 0, :idempotency_key"
+                                ")"
+                            ),
+                            other_application_record,
+                        )
+                finally:
+                    engine.dispose()
+
+                duplicate_record = {
+                    **legacy_ids,
+                    "id": str(uuid4()),
+                    "run_number": 4,
+                    "idempotency_key": "request-key",
+                }
+                engine = create_engine(database_url)
+                try:
+                    with self.assertRaises(IntegrityError):
+                        with engine.begin() as connection:
+                            connection.execute(
+                                text(
+                                    "INSERT INTO screening_results ("
+                                    "id, application_id, resume_document_id, "
+                                    "job_description_version_id, run_number, final_label, "
+                                    "model_label, model_probabilities, "
+                                    "decision_policy_version, model_artifact_version, "
+                                    "required_group_count, matched_required_group_count, "
+                                    "idempotency_key"
+                                    ") VALUES ("
+                                    ":id, :application_id, :resume_document_id, "
+                                    ":job_description_version_id, :run_number, 'No Fit', "
+                                    "'No Fit', '{\"No Fit\": 1.0}', 'test-policy', "
+                                    "'test-model', 0, 0, :idempotency_key"
+                                    ")"
+                                ),
+                                duplicate_record,
+                            )
+                finally:
+                    engine.dispose()
+
+                command.downgrade(config, "c68042771911")
+                engine = create_engine(database_url)
+                try:
+                    with engine.connect() as connection:
+                        column_names = {
+                            column["name"]
+                            for column in inspect(connection).get_columns(
+                                "screening_results"
+                            )
+                        }
+                        self.assertNotIn("idempotency_key", column_names)
+                        legacy_exists = connection.execute(
+                            text(
+                                "SELECT 1 FROM screening_results WHERE id = :id"
+                            ),
+                            {"id": legacy_ids["id"]},
+                        ).one_or_none()
+                        self.assertIsNotNone(legacy_exists)
+                finally:
+                    engine.dispose()
+
     def test_alembic_upgrade_and_downgrade_on_disposable_sqlite_database(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "migration-test.sqlite"

@@ -227,6 +227,31 @@ class TestCandidateAPI(unittest.TestCase):
         self.assertEqual(record["missing_required_skills"], ["SQL"])
         self.assertEqual(record["required_skill_coverage"], 0.5)
 
+    def test_screening_history_reads_fallback_requirement_snapshots(self):
+        candidate = self._create_screening_history()
+        with self.SessionLocal() as session:
+            result = session.scalar(select(ScreeningResult))
+            session.add(
+                ScreeningRequirementResult(
+                    screening_result_id=result.id,
+                    requirement_group_id=None,
+                    requirement_snapshot={
+                        "canonical_identifier": "jd-required-2",
+                        "name": "Go",
+                        "kind": "required",
+                        "skills": ["Go"],
+                        "source": "jd_text_fallback",
+                    },
+                    matched=False,
+                )
+            )
+            session.commit()
+
+        response = self.client.get(f"/api/candidates/{candidate.id}/screenings/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["missing_required_skills"], ["Go", "SQL"])
+
     def test_screening_history_is_empty_before_any_result_is_persisted(self):
         candidate = self.client.post(
             "/api/candidates/",

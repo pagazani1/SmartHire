@@ -14,6 +14,7 @@ from fastapi import (
     FastAPI,
     File,
     Form,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -51,8 +52,20 @@ from backend.schemas import (
     JobCreate,
     JobRead,
     JobUpdate,
+    PersistentScreeningRequest,
+    PersistentScreeningResponse,
     ResumeDocumentRead,
     ScreeningHistoryRead,
+    ScreeningRequirementSnapshot,
+)
+from backend.services.persistent_screening import (
+    PersistentScreeningError,
+    ScreeningConflictError,
+    ScreeningConsentError,
+    ScreeningNotFoundError,
+    ScreeningValidationError,
+    format_screening_response,
+    screen_application,
 )
 from backend.services.resume_documents import (
     CandidateNotFoundError,
@@ -585,6 +598,56 @@ def get_candidate(
     return CandidateDetailResponse.model_validate(candidate)
 
 
+def _screening_history_item(result: ScreeningResult) -> ScreeningHistoryRead:
+    matched_required_skills: set[str] = set()
+    missing_required_skills: set[str] = set()
+    for requirement_result in result.requirement_results:
+        group = requirement_result.requirement_group
+        if group is None:
+            snapshot = ScreeningRequirementSnapshot.model_validate(
+                requirement_result.requirement_snapshot
+            )
+            if snapshot.kind != RequirementKind.REQUIRED:
+                continue
+            if requirement_result.matched:
+                if requirement_result.matched_skill is not None:
+                    matched_required_skills.add(
+                        requirement_result.matched_skill.canonical_name
+                    )
+            else:
+                missing_required_skills.update(snapshot.skills)
+            continue
+        if group.kind != RequirementKind.REQUIRED:
+            continue
+        if requirement_result.matched:
+            if requirement_result.matched_skill is not None:
+                matched_required_skills.add(
+                    requirement_result.matched_skill.canonical_name
+                )
+        else:
+            missing_required_skills.update(
+                option.skill.canonical_name for option in group.options
+            )
+
+    return ScreeningHistoryRead(
+        id=result.id,
+        application_id=result.application_id,
+        resume_document_id=result.resume_document_id,
+        job_description_version_id=result.job_description_version_id,
+        created_at=result.created_at,
+        final_label=result.final_label,
+        model_label=result.model_label,
+        model_probabilities=result.model_probabilities,
+        decision_policy_version=result.decision_policy_version,
+        decision_explanation=result.decision_explanation,
+        matched_required_skills=sorted(matched_required_skills),
+        missing_required_skills=sorted(missing_required_skills),
+        required_group_count=result.required_group_count,
+        matched_required_group_count=result.matched_required_group_count,
+        required_skill_coverage=result.required_skill_coverage,
+    )
+
+
 @app.get(
     "/api/candidates/{candidate_id}/screenings/",
     response_model=list[ScreeningHistoryRead],
@@ -619,44 +682,120 @@ def get_candidate_screenings(
         .offset(offset)
     ).all()
 
-    history: list[ScreeningHistoryRead] = []
-    for result in screening_results:
-        matched_required_skills: set[str] = set()
-        missing_required_skills: set[str] = set()
-        for requirement_result in result.requirement_results:
-            group = requirement_result.requirement_group
-            if group.kind != RequirementKind.REQUIRED:
-                continue
-            if requirement_result.matched:
-                if requirement_result.matched_skill is not None:
-                    matched_required_skills.add(
-                        requirement_result.matched_skill.canonical_name
-                    )
-            else:
-                missing_required_skills.update(
-                    option.skill.canonical_name for option in group.options
-                )
+    return [_screening_history_item(result) for result in screening_results]
 
-        history.append(
-            ScreeningHistoryRead(
-                id=result.id,
-                application_id=result.application_id,
-                resume_document_id=result.resume_document_id,
-                job_description_version_id=result.job_description_version_id,
-                created_at=result.created_at,
-                final_label=result.final_label,
-                model_label=result.model_label,
-                model_probabilities=result.model_probabilities,
-                decision_policy_version=result.decision_policy_version,
-                decision_explanation=result.decision_explanation,
-                matched_required_skills=sorted(matched_required_skills),
-                missing_required_skills=sorted(missing_required_skills),
-                required_group_count=result.required_group_count,
-                matched_required_group_count=result.matched_required_group_count,
-                required_skill_coverage=result.required_skill_coverage,
-            )
+
+@app.post(
+    "/api/applications/{application_id}/screenings/",
+    response_model=PersistentScreeningResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["screenings"],
+    summary="Screen a candidate application with persistent explainable history",
+    dependencies=[Depends(require_resume_management_access)],
+)
+def create_application_screening(
+    application_id: UUID,
+    request: PersistentScreeningRequest,
+    db: Annotated[Session, Depends(get_db)],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> PersistentScreeningResponse:
+    key = idempotency_key.strip()
+    if not key:
+        raise HTTPException(
+            status_code=422,
+            detail="A non-empty Idempotency-Key header is required.",
         )
-    return history
+    if len(key) > 255:
+        raise HTTPException(
+            status_code=422,
+            detail="Idempotency-Key header must not exceed 255 characters.",
+        )
+
+    resume_service = _resume_service()
+    recruiter_id = _configured_development_recruiter_id()
+
+    try:
+        screening_result = screen_application(
+            db=db,
+            application_id=application_id,
+            resume_document_id=request.resume_document_id,
+            job_description_version_id=request.job_description_version_id,
+            idempotency_key=key,
+            recruiter_id=recruiter_id,
+            resume_service=resume_service,
+        )
+    except ScreeningNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ScreeningConsentError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ScreeningConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ScreeningValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (ResumeNotFoundError, CandidateNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidConsentError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except DevelopmentRecruiterError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (ResumeStorageUnavailableError, StorageError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PDFExtractionError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unable to extract text from the uploaded PDF. "
+                "Provide a valid text-based PDF; OCR is not available."
+            ),
+        ) from exc
+    except (ResumeUploadError, ResumeDatabaseError) as exc:
+        raise _resume_http_error(exc) from exc
+    except PersistentScreeningError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=500,
+            detail="Database operation failed during screening.",
+        )
+
+    return format_screening_response(screening_result)
+
+
+@app.get(
+    "/api/applications/{application_id}/screenings/",
+    response_model=list[ScreeningHistoryRead],
+    tags=["screenings"],
+    summary="List persistent screening history for an application",
+    dependencies=[Depends(require_resume_management_access)],
+)
+def get_application_screenings(
+    application_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[ScreeningHistoryRead]:
+    application = db.get(Application, application_id)
+    if application is None:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    screening_results = db.scalars(
+        select(ScreeningResult)
+        .where(ScreeningResult.application_id == application_id)
+        .options(
+            selectinload(ScreeningResult.requirement_results)
+            .selectinload(ScreeningRequirementResult.requirement_group)
+            .selectinload(JobRequirementGroup.options)
+            .selectinload(JobRequirementOption.skill),
+            selectinload(ScreeningResult.requirement_results).selectinload(
+                ScreeningRequirementResult.matched_skill
+            ),
+        )
+        .order_by(ScreeningResult.created_at.desc(), ScreeningResult.id)
+        .limit(limit)
+        .offset(offset)
+    ).all()
+
+    return [_screening_history_item(result) for result in screening_results]
 
 
 @app.post(

@@ -407,6 +407,11 @@ class ScreeningResult(Base):
     __tablename__ = "screening_results"
     __table_args__ = (
         UniqueConstraint("application_id", "run_number", name="uq_screening_results_application_run"),
+        UniqueConstraint(
+            "application_id",
+            "idempotency_key",
+            name="uq_screening_results_application_idempotency_key",
+        ),
         CheckConstraint("run_number > 0", name="run_number_positive"),
         CheckConstraint(
             "required_group_count >= 0 AND matched_required_group_count >= 0 "
@@ -425,6 +430,7 @@ class ScreeningResult(Base):
     application_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("applications.id", ondelete="RESTRICT"), nullable=False
     )
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
     resume_document_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("resume_documents.id", ondelete="RESTRICT"), nullable=False
     )
@@ -493,15 +499,31 @@ class ScreeningEvidence(Base):
 
 class ScreeningRequirementResult(Base):
     __tablename__ = "screening_requirement_results"
-    __table_args__ = (Index("ix_screening_requirement_results_group_matched", "requirement_group_id", "matched"),)
-
-    screening_result_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("screening_results.id", ondelete="RESTRICT"), primary_key=True
+    __table_args__ = (
+        UniqueConstraint(
+            "screening_result_id",
+            "requirement_group_id",
+            name="uq_screening_requirement_results_result_group",
+        ),
+        Index(
+            "ix_screening_requirement_results_group_matched",
+            "requirement_group_id",
+            "matched",
+        ),
     )
-    requirement_group_id: Mapped[uuid.UUID] = mapped_column(
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    screening_result_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("screening_results.id", ondelete="RESTRICT"), nullable=False
+    )
+    requirement_group_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("job_requirement_groups.id", ondelete="RESTRICT"),
-        primary_key=True,
+    )
+    requirement_snapshot: Mapped[dict[str, object] | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql")
     )
     matched: Mapped[bool] = mapped_column(Boolean, nullable=False)
     matched_skill_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -509,7 +531,9 @@ class ScreeningRequirementResult(Base):
     )
 
     screening_result: Mapped[ScreeningResult] = relationship(back_populates="requirement_results")
-    requirement_group: Mapped[JobRequirementGroup] = relationship(back_populates="screening_results")
+    requirement_group: Mapped[JobRequirementGroup | None] = relationship(
+        back_populates="screening_results"
+    )
     matched_skill: Mapped[Skill | None] = relationship()
 
 

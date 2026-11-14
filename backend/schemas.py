@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -217,6 +218,85 @@ class ScreeningHistoryRead(BaseModel):
     required_skill_coverage: float | None
 
 
+class PersistentScreeningRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resume_document_id: UUID
+    job_description_version_id: UUID
+
+
+class ScreeningEvidenceRead(BaseModel):
+    skill: str
+    evidence_kind: EvidenceKind
+
+
+class ScreeningRequirementSnapshot(BaseModel):
+    canonical_identifier: str | None = None
+    name: str | None = None
+    kind: RequirementKind
+    skills: list[str] = Field(min_length=1)
+    source: Literal["structured", "jd_text_fallback"]
+
+    @model_validator(mode="after")
+    def require_requirement_identity(self) -> ScreeningRequirementSnapshot:
+        if not self.canonical_identifier and not self.name:
+            raise ValueError("A requirement snapshot must include a name or identifier.")
+        return self
+
+
+class ScreeningRequirementResultRead(BaseModel):
+    requirement_group_id: UUID | None
+    requirement_snapshot: ScreeningRequirementSnapshot | None = None
+    kind: RequirementKind
+    skills: list[str]
+    matched: bool
+    matched_skill: str | None
+
+    @model_validator(mode="after")
+    def validate_snapshot_source(self) -> ScreeningRequirementResultRead:
+        if self.requirement_group_id is None:
+            if (
+                self.requirement_snapshot is None
+                or self.requirement_snapshot.source != "jd_text_fallback"
+            ):
+                raise ValueError(
+                    "Fallback requirement results must include a fallback snapshot."
+                )
+        elif (
+            self.requirement_snapshot is not None
+            and self.requirement_snapshot.source != "structured"
+        ):
+            raise ValueError(
+                "Structured requirement results must use a structured snapshot."
+            )
+        return self
+
+
+class PersistentScreeningResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    application_id: UUID
+    resume_document_id: UUID
+    job_description_version_id: UUID
+    run_number: int
+    final_label: FitLabel
+    model_label: FitLabel
+    model_probabilities: dict[str, float]
+    decision_policy_version: str
+    model_artifact_version: str
+    decision_explanation: str | None
+    required_group_count: int
+    matched_required_group_count: int
+    missing_required_group_count: int
+    required_skill_coverage: float | None
+    required_skill_coverage_percentage: float | None
+    evidence: list[ScreeningEvidenceRead] = Field(default_factory=list)
+    requirement_results: list[ScreeningRequirementResultRead] = Field(
+        default_factory=list
+    )
+
+
 class ApplicationCreate(BaseModel):
     candidate_id: UUID
     job_id: UUID
@@ -327,10 +407,15 @@ __all__ = [
     "JobRequirementGroupRead",
     "JobUpdate",
     "JobDescriptionVersionCreate",
+    "PersistentScreeningRequest",
+    "PersistentScreeningResponse",
     "RecruiterCreate",
     "ResumeDocumentCreate",
     "ResumeDocumentRead",
     "ScreeningEvidenceCreate",
+    "ScreeningEvidenceRead",
+    "ScreeningRequirementResultRead",
+    "ScreeningRequirementSnapshot",
     "ScreeningResultCreate",
     "ScreeningHistoryRead",
     "VerificationRecordCreate",
