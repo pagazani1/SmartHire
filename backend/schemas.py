@@ -144,6 +144,7 @@ class JobRead(ORMModel):
     updated_at: datetime
     description: str | None
     description_version: int | None
+    description_version_id: UUID | None = None
     required_skill_groups: list[list[str]]
     preferred_skill_groups: list[list[str]]
 

@@ -1,13 +1,20 @@
 import { useState } from "react";
 import Icon from "./Icon.jsx";
 
-function Sidebar() {
+function Sidebar({ activeView, onSelectView }) {
   const [isOpen, setIsOpen] = useState(false);
+
+  function handleNavigate(view) {
+    if (onSelectView) {
+      onSelectView(view);
+    }
+    setIsOpen(false);
+  }
 
   return (
     <>
       <div className="fixed left-0 top-0 z-30 flex h-[68px] w-full items-center justify-between border-b border-slate-200 bg-white px-5 lg:hidden">
-        <Brand />
+        <Brand onSelect={() => handleNavigate("persistent")} />
         <button
           aria-expanded={isOpen}
           aria-label={isOpen ? "Close navigation" : "Open navigation"}
@@ -24,30 +31,39 @@ function Sidebar() {
         }`}
       >
         <div className="hidden px-2 lg:block">
-          <Brand />
+          <Brand onSelect={() => handleNavigate("persistent")} />
         </div>
 
         <div className="mt-10 px-2 text-[10px] font-bold tracking-[0.16em] text-slate-400">
           WORKSPACE
         </div>
         <nav aria-label="Main navigation" className="mt-3 space-y-1">
-          <a
-            aria-current="page"
-            className="flex items-center gap-3 rounded-xl bg-indigo-50 px-3 py-2.5 text-sm font-semibold text-indigo-800"
-            href="#workspace"
-            onClick={() => setIsOpen(false)}
+          <button
+            aria-current={activeView === "persistent" ? "page" : undefined}
+            className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
+              activeView === "persistent"
+                ? "bg-indigo-50 font-semibold text-indigo-800"
+                : "font-medium text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+            }`}
+            onClick={() => handleNavigate("persistent")}
+            type="button"
           >
             <Icon name="home" className="h-[18px] w-[18px]" />
-            Overview
-          </a>
-          <a
-            className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-500 transition hover:bg-slate-50 hover:text-slate-800"
-            href="#new-analysis"
-            onClick={() => setIsOpen(false)}
+            Application screening
+          </button>
+          <button
+            aria-current={activeView === "quick" ? "page" : undefined}
+            className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
+              activeView === "quick"
+                ? "bg-indigo-50 font-semibold text-indigo-800"
+                : "font-medium text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+            }`}
+            onClick={() => handleNavigate("quick")}
+            type="button"
           >
             <Icon name="plus" className="h-[18px] w-[18px]" />
-            New analysis
-          </a>
+            Quick resume check
+          </button>
         </nav>
 
         <div className="mt-auto rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200/80">
@@ -62,7 +78,7 @@ function Sidebar() {
           </p>
         </div>
         <div className="mt-4 border-t border-slate-100 px-2 pt-4 text-xs text-slate-400">
-          SmartHire · Recruiter tools
+          SmartHire &middot; Recruiter tools
         </div>
       </aside>
       {isOpen && (
@@ -77,16 +93,20 @@ function Sidebar() {
   );
 }
 
-function Brand() {
+function Brand({ onSelect }) {
   return (
-    <a className="inline-flex items-center gap-2.5" href="#workspace">
+    <button
+      className="inline-flex items-center gap-2.5 text-left"
+      onClick={onSelect}
+      type="button"
+    >
       <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-700 text-white shadow-sm">
         <Icon name="sparkles" className="h-[18px] w-[18px]" />
       </span>
       <span className="text-[17px] font-bold tracking-tight text-slate-950">
         Smart<span className="text-indigo-700">Hire</span>
       </span>
-    </a>
+    </button>
   );
 }
 

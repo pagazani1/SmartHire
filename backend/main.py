@@ -131,6 +131,9 @@ def _job_response(job: Job) -> JobRead:
         description_version=(
             description_version.version if description_version is not None else None
         ),
+        description_version_id=(
+            description_version.id if description_version is not None else None
+        ),
         required_skill_groups=required_groups,
         preferred_skill_groups=preferred_groups,
     )
