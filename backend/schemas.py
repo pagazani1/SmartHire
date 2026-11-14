@@ -16,6 +16,7 @@ from backend.db.models import (
     EvidenceKind,
     FitLabel,
     JobStatus,
+    RecruiterRole,
     RecruiterStatus,
     RequirementKind,
     VerificationStatus,
@@ -54,7 +55,36 @@ class ORMModel(BaseModel):
 class RecruiterCreate(BaseModel):
     email_normalized: str = Field(min_length=3, max_length=320)
     display_name: str = Field(min_length=1, max_length=200)
+    role: RecruiterRole = RecruiterRole.RECRUITER
     status: RecruiterStatus = RecruiterStatus.ACTIVE
+
+
+class RecruiterRead(ORMModel):
+    id: UUID
+    email_normalized: str
+    display_name: str
+    role: RecruiterRole
+    status: RecruiterStatus
+
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_at: datetime
+    recruiter: RecruiterRead
+
+
+class RetentionSweepResponse(BaseModel):
+    inspected_count: int
+    expired_count: int
+    failed_count: int
 
 
 class JobCreate(BaseModel):
@@ -408,9 +438,12 @@ __all__ = [
     "JobRequirementGroupRead",
     "JobUpdate",
     "JobDescriptionVersionCreate",
+    "LoginRequest",
     "PersistentScreeningRequest",
     "PersistentScreeningResponse",
     "RecruiterCreate",
+    "RecruiterRead",
+    "RetentionSweepResponse",
     "ResumeDocumentCreate",
     "ResumeDocumentRead",
     "ScreeningEvidenceCreate",
@@ -419,5 +452,6 @@ __all__ = [
     "ScreeningRequirementSnapshot",
     "ScreeningResultCreate",
     "ScreeningHistoryRead",
+    "TokenResponse",
     "VerificationRecordCreate",
 ]

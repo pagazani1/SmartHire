@@ -32,6 +32,11 @@ class RecruiterStatus(str, Enum):
     DISABLED = "disabled"
 
 
+class RecruiterRole(str, Enum):
+    RECRUITER = "recruiter"
+    ADMIN = "admin"
+
+
 class JobStatus(str, Enum):
     DRAFT = "draft"
     OPEN = "open"
@@ -135,6 +140,13 @@ class Recruiter(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email_normalized: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    role: Mapped[RecruiterRole] = mapped_column(
+        _enum(RecruiterRole, "recruiter_role"),
+        nullable=False,
+        default=RecruiterRole.RECRUITER,
+        server_default=RecruiterRole.RECRUITER.value,
+    )
+    password_hash: Mapped[str | None] = mapped_column(String(500))
     status: Mapped[RecruiterStatus] = mapped_column(
         _enum(RecruiterStatus, "recruiter_status"),
         nullable=False,
@@ -615,6 +627,7 @@ __all__ = [
     "JobRequirementOption",
     "JobStatus",
     "Recruiter",
+    "RecruiterRole",
     "RecruiterStatus",
     "RequirementKind",
     "ResumeDocument",

@@ -1,7 +1,5 @@
 """FastAPI endpoints for SmartHire resume analysis."""
 
-import ipaddress
-import os
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,7 +15,6 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
-    Request,
     Response,
     UploadFile,
     status,
@@ -36,6 +33,8 @@ from backend.db.models import (
     JobRequirementGroup,
     JobRequirementOption,
     Recruiter,
+    RecruiterRole,
+    RecruiterStatus,
     RequirementKind,
     ResumeDocument,
     Skill,
@@ -52,11 +51,26 @@ from backend.schemas import (
     JobCreate,
     JobRead,
     JobUpdate,
+    LoginRequest,
     PersistentScreeningRequest,
     PersistentScreeningResponse,
+    RecruiterRead,
+    RetentionSweepResponse,
     ResumeDocumentRead,
     ScreeningHistoryRead,
     ScreeningRequirementSnapshot,
+    TokenResponse,
+)
+from backend.security import (
+    create_access_token,
+    ensure_application_access,
+    ensure_job_access,
+    ensure_resume_access,
+    get_current_recruiter,
+    is_development_mode_enabled,
+    is_loopback_request,
+    log_security_event,
+    verify_password,
 )
 from backend.services.persistent_screening import (
     PersistentScreeningError,
@@ -77,6 +91,7 @@ from backend.services.resume_documents import (
     ResumeStorageUnavailableError,
     ResumeUploadError,
 )
+from backend.services.retention import enforce_document_retention
 from backend.storage.adapter import StorageError
 from backend.storage.local_filesystem import LocalFilesystemStorage
 from predict import validate_text_input
@@ -199,23 +214,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="SmartHire API", lifespan=lifespan)
 
 
+
+
 def require_resume_management_access(request: Request) -> None:
-    """Limit this unauthenticated milestone to explicitly enabled loopback use."""
-    development_mode = os.getenv("SMART_HIRE_DEVELOPMENT_MODE", "").strip().casefold()
-    if development_mode not in {"1", "true", "yes"}:
+    """Verify explicit local development mode and loopback origin when called directly."""
+    if not is_development_mode_enabled():
         raise HTTPException(
             status_code=403,
-            detail="Resume management is available only in configured development mode.",
+            detail="Private resume management endpoints require explicit development mode.",
         )
-    client_host = request.client.host if request.client is not None else ""
-    try:
-        is_loopback = ipaddress.ip_address(client_host).is_loopback
-    except ValueError:
-        is_loopback = False
-    if not is_loopback:
+    if not is_loopback_request(request):
         raise HTTPException(
             status_code=403,
-            detail="Resume management is restricted to loopback clients.",
+            detail="Private resume management endpoints are restricted to loopback clients.",
         )
 
 
@@ -228,17 +239,6 @@ def _resume_service() -> ResumeDocumentService:
             detail="Private resume storage is unavailable.",
         ) from None
     return ResumeDocumentService(storage)
-
-
-def _configured_development_recruiter_id() -> UUID:
-    recruiter_value = os.getenv("SMART_HIRE_DEVELOPMENT_RECRUITER_ID", "").strip()
-    try:
-        return UUID(recruiter_value)
-    except (ValueError, TypeError, AttributeError):
-        raise HTTPException(
-            status_code=503,
-            detail="A valid development recruiter identity is not configured.",
-        ) from None
 
 
 def _resume_http_error(error: Exception) -> HTTPException:
@@ -299,6 +299,103 @@ class AnalysisResponse(BaseModel):
 def health_check() -> dict[str, str]:
     """Return a simple backend liveness status."""
     return {"status": "ok"}
+
+
+@app.post(
+    "/api/auth/login",
+    response_model=TokenResponse,
+    tags=["auth"],
+    summary="Authenticate a recruiter and issue a signed bearer token",
+)
+def login_recruiter(
+    credentials: LoginRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> TokenResponse:
+    normalized_email = credentials.email.strip().casefold()
+    recruiter = db.scalar(
+        select(Recruiter).where(Recruiter.email_normalized == normalized_email)
+    )
+    if (
+        recruiter is None
+        or recruiter.status != RecruiterStatus.ACTIVE
+        or not verify_password(credentials.password, recruiter.password_hash)
+    ):
+        log_security_event(
+            "auth.login_failed",
+            outcome="denied",
+            recruiter_id=recruiter.id if recruiter is not None else None,
+            reason="invalid_credentials_or_inactive",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token, expires_at = create_access_token(recruiter)
+    log_security_event(
+        "auth.login_success",
+        outcome="success",
+        recruiter_id=recruiter.id,
+    )
+    return TokenResponse(
+        access_token=token,
+        expires_at=expires_at,
+        recruiter=RecruiterRead.model_validate(recruiter),
+    )
+
+
+@app.get(
+    "/api/auth/me",
+    response_model=RecruiterRead,
+    tags=["auth"],
+    summary="Return the currently authenticated recruiter profile",
+)
+def read_authenticated_recruiter(
+    current_recruiter: Annotated[Recruiter, Depends(get_current_recruiter)],
+) -> RecruiterRead:
+    return RecruiterRead.model_validate(current_recruiter)
+
+
+@app.post(
+    "/api/admin/retention/sweep",
+    response_model=RetentionSweepResponse,
+    tags=["admin"],
+    summary="Purge resume documents past their retention deadline",
+)
+def run_retention_sweep(
+    db: Annotated[Session, Depends(get_db)],
+    current_recruiter: Annotated[Recruiter, Depends(get_current_recruiter)],
+) -> RetentionSweepResponse:
+    if current_recruiter.role != RecruiterRole.ADMIN:
+        log_security_event(
+            "rbac.retention_sweep_denied",
+            outcome="denied",
+            recruiter_id=current_recruiter.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges are required to trigger retention sweeps.",
+        )
+
+    try:
+        storage = LocalFilesystemStorage()
+    except StorageError:
+        raise HTTPException(
+            status_code=503,
+            detail="Private resume storage is unavailable.",
+        ) from None
+
+    summary = enforce_document_retention(
+        db,
+        storage,
+        actor_recruiter_id=current_recruiter.id,
+    )
+    return RetentionSweepResponse(
+        inspected_count=summary.inspected_count,
+        expired_count=summary.expired_count,
+        failed_count=summary.failed_count,
+    )
 
 
 @app.post(
@@ -694,12 +791,12 @@ def get_candidate_screenings(
     status_code=status.HTTP_201_CREATED,
     tags=["screenings"],
     summary="Screen a candidate application with persistent explainable history",
-    dependencies=[Depends(require_resume_management_access)],
 )
 def create_application_screening(
     application_id: UUID,
     request: PersistentScreeningRequest,
     db: Annotated[Session, Depends(get_db)],
+    current_recruiter: Annotated[Recruiter, Depends(get_current_recruiter)],
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
 ) -> PersistentScreeningResponse:
     key = idempotency_key.strip()
@@ -714,8 +811,11 @@ def create_application_screening(
             detail="Idempotency-Key header must not exceed 255 characters.",
         )
 
+    application = db.get(Application, application_id)
+    if application is not None:
+        ensure_application_access(current_recruiter, application)
+
     resume_service = _resume_service()
-    recruiter_id = _configured_development_recruiter_id()
 
     try:
         screening_result = screen_application(
@@ -724,12 +824,19 @@ def create_application_screening(
             resume_document_id=request.resume_document_id,
             job_description_version_id=request.job_description_version_id,
             idempotency_key=key,
-            recruiter_id=recruiter_id,
+            recruiter_id=current_recruiter.id,
             resume_service=resume_service,
         )
     except ScreeningNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ScreeningConsentError as exc:
+        log_security_event(
+            "screening.consent_denied",
+            outcome="denied",
+            recruiter_id=current_recruiter.id,
+            resource_type="application",
+            resource_id=application_id,
+        )
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ScreeningConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -738,6 +845,13 @@ def create_application_screening(
     except (ResumeNotFoundError, CandidateNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except InvalidConsentError as exc:
+        log_security_event(
+            "screening.consent_denied",
+            outcome="denied",
+            recruiter_id=current_recruiter.id,
+            resource_type="application",
+            resource_id=application_id,
+        )
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except DevelopmentRecruiterError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -761,6 +875,13 @@ def create_application_screening(
             detail="Database operation failed during screening.",
         )
 
+    log_security_event(
+        "screening.executed",
+        outcome="success",
+        recruiter_id=current_recruiter.id,
+        resource_type="screening_result",
+        resource_id=screening_result.id,
+    )
     return format_screening_response(screening_result)
 
 
@@ -769,17 +890,18 @@ def create_application_screening(
     response_model=list[ScreeningHistoryRead],
     tags=["screenings"],
     summary="List persistent screening history for an application",
-    dependencies=[Depends(require_resume_management_access)],
 )
 def get_application_screenings(
     application_id: UUID,
     db: Annotated[Session, Depends(get_db)],
+    current_recruiter: Annotated[Recruiter, Depends(get_current_recruiter)],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ScreeningHistoryRead]:
     application = db.get(Application, application_id)
     if application is None:
         raise HTTPException(status_code=404, detail="Application not found.")
+    ensure_application_access(current_recruiter, application)
 
     screening_results = db.scalars(
         select(ScreeningResult)
@@ -807,23 +929,22 @@ def get_application_screenings(
     status_code=status.HTTP_201_CREATED,
     tags=["resumes"],
     summary="Upload a private resume document",
-    dependencies=[Depends(require_resume_management_access)],
 )
 def upload_resume(
     candidate_id: UUID,
     file: Annotated[UploadFile, File(description="PDF resume")],
     consent_record_id: Annotated[UUID, Form()],
     db: Annotated[Session, Depends(get_db)],
+    current_recruiter: Annotated[Recruiter, Depends(get_current_recruiter)],
 ) -> ResumeDocumentRead:
     """Validate consent and store a private PDF with metadata only in the database."""
     try:
         service = _resume_service()
-        recruiter_id = _configured_development_recruiter_id()
         document = service.upload(
             db=db,
             candidate_id=candidate_id,
             consent_id=consent_record_id,
-            recruiter_id=recruiter_id,
+            recruiter_id=current_recruiter.id,
             source=file.file,
             filename=file.filename,
             media_type=file.content_type,
@@ -840,6 +961,14 @@ def upload_resume(
         raise _resume_http_error(exc) from None
     finally:
         file.file.close()
+
+    log_security_event(
+        "resume.uploaded",
+        outcome="success",
+        recruiter_id=current_recruiter.id,
+        resource_type="resume_document",
+        resource_id=document.id,
+    )
     return _resume_response(document)
 
 
@@ -848,11 +977,11 @@ def upload_resume(
     response_model=list[ResumeDocumentRead],
     tags=["resumes"],
     summary="List a candidate's private resume metadata",
-    dependencies=[Depends(require_resume_management_access)],
 )
 def list_candidate_resumes(
     candidate_id: UUID,
     db: Annotated[Session, Depends(get_db)],
+    current_recruiter: Annotated[Recruiter, Depends(get_current_recruiter)],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ResumeDocumentRead]:
@@ -870,16 +999,17 @@ def list_candidate_resumes(
     response_model=ResumeDocumentRead,
     tags=["resumes"],
     summary="Get private resume metadata",
-    dependencies=[Depends(require_resume_management_access)],
 )
 def get_resume_metadata(
     resume_id: UUID,
     db: Annotated[Session, Depends(get_db)],
+    current_recruiter: Annotated[Recruiter, Depends(get_current_recruiter)],
 ) -> ResumeDocumentRead:
     try:
         document = ResumeDocumentService.get_metadata(db, resume_id)
     except (ResumeNotFoundError, SQLAlchemyError) as exc:
         raise _resume_http_error(exc) from None
+    ensure_resume_access(db, current_recruiter, document)
     return _resume_response(document)
 
 
@@ -887,13 +1017,19 @@ def get_resume_metadata(
     "/api/resumes/{resume_id}/download",
     tags=["resumes"],
     summary="Download a private resume",
-    dependencies=[Depends(require_resume_management_access)],
 )
 def download_resume(
     resume_id: UUID,
     db: Annotated[Session, Depends(get_db)],
+    current_recruiter: Annotated[Recruiter, Depends(get_current_recruiter)],
 ) -> StreamingResponse:
     service = _resume_service()
+    try:
+        document_meta = ResumeDocumentService.get_metadata(db, resume_id)
+    except (ResumeNotFoundError, SQLAlchemyError) as exc:
+        raise _resume_http_error(exc) from None
+    ensure_resume_access(db, current_recruiter, document_meta)
+
     try:
         document, stored_file = service.open_download(db, resume_id)
     except (
@@ -903,6 +1039,14 @@ def download_resume(
         SQLAlchemyError,
     ) as exc:
         raise _resume_http_error(exc) from None
+
+    log_security_event(
+        "resume.downloaded",
+        outcome="success",
+        recruiter_id=current_recruiter.id,
+        resource_type="resume_document",
+        resource_id=document.id,
+    )
 
     def stream_file():
         try:
@@ -935,13 +1079,19 @@ def download_resume(
     status_code=status.HTTP_204_NO_CONTENT,
     tags=["resumes"],
     summary="Soft-delete a private resume and remove its file",
-    dependencies=[Depends(require_resume_management_access)],
 )
 def delete_resume(
     resume_id: UUID,
     db: Annotated[Session, Depends(get_db)],
+    current_recruiter: Annotated[Recruiter, Depends(get_current_recruiter)],
 ) -> Response:
     service = _resume_service()
+    try:
+        document_meta = ResumeDocumentService.get_metadata(db, resume_id)
+    except (ResumeNotFoundError, SQLAlchemyError) as exc:
+        raise _resume_http_error(exc) from None
+    ensure_resume_access(db, current_recruiter, document_meta)
+
     try:
         service.delete(db, resume_id)
     except (
@@ -951,6 +1101,14 @@ def delete_resume(
         SQLAlchemyError,
     ) as exc:
         raise _resume_http_error(exc) from None
+
+    log_security_event(
+        "resume.deleted",
+        outcome="success",
+        recruiter_id=current_recruiter.id,
+        resource_type="resume_document",
+        resource_id=resume_id,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
