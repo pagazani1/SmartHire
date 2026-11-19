@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import unicodedata
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO, Iterator
 from uuid import UUID, uuid4
@@ -38,6 +38,32 @@ logger = logging.getLogger(__name__)
 MAX_RESUME_BYTES = 10 * 1024 * 1024
 READ_CHUNK_BYTES = 64 * 1024
 ALLOWED_MEDIA_TYPES = {"", "application/pdf", "application/octet-stream"}
+# Placeholder retention period; the real value must come from your privacy policy / legal review.
+DEFAULT_RETENTION_DAYS = 180
+
+
+def resume_retention_deadline(
+    now: datetime, consent_expires_at: datetime | None
+) -> datetime | None:
+    """When a stored resume must be purged: the retention period, or consent expiry if sooner.
+
+    ``SMART_HIRE_RESUME_RETENTION_DAYS`` overrides the default; 0 disables the time limit
+    (the consent expiry, if any, still applies).
+    """
+    raw = os.getenv("SMART_HIRE_RESUME_RETENTION_DAYS", "").strip()
+    try:
+        days = int(raw) if raw else DEFAULT_RETENTION_DAYS
+    except ValueError:
+        days = DEFAULT_RETENTION_DAYS
+    deadline = now + timedelta(days=days) if days > 0 else None
+    if consent_expires_at is not None:
+        expiry = (
+            consent_expires_at.replace(tzinfo=timezone.utc)
+            if consent_expires_at.tzinfo is None
+            else consent_expires_at
+        )
+        deadline = expiry if deadline is None else min(deadline, expiry)
+    return deadline
 
 
 class ResumeDocumentError(Exception):
@@ -225,6 +251,9 @@ class ResumeDocumentService:
             byte_size=byte_size,
             sha256=hasher.hexdigest(),
             status=DocumentStatus.AVAILABLE,
+            retention_until=resume_retention_deadline(
+                datetime.now(timezone.utc), consent.expires_at
+            ),
         )
         try:
             db.add(document)

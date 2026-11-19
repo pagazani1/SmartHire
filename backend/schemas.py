@@ -81,14 +81,81 @@ class TokenResponse(BaseModel):
     recruiter: RecruiterRead
 
 
+class SkillVocabularyResponse(BaseModel):
+    """Every skill name that job requirement groups may use."""
+
+    skills: list[str]
+
+
+class RecruiterAccountCreate(BaseModel):
+    """Admin-only request body for creating a recruiter account with a password."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=320)
+    display_name: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=10, max_length=256)
+    role: RecruiterRole = RecruiterRole.RECRUITER
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_shape(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        local, _, domain = normalized.partition("@")
+        if not local or "." not in domain or " " in normalized:
+            raise ValueError("A valid email address is required.")
+        return normalized
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def strip_display_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class ConsentGrantRequest(BaseModel):
+    """Recruiter-recorded consent. The capture time is set by the server, not the client."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    purpose: ConsentPurpose
+    application_id: UUID | None = None
+    notice_version: str = Field(min_length=1, max_length=100)
+    capture_method: str = Field(min_length=1, max_length=100)
+    proof_reference: str | None = Field(default=None, max_length=500)
+    expires_at: datetime | None = None
+
+
+class ConsentRead(ORMModel):
+    id: UUID
+    candidate_id: UUID
+    application_id: UUID | None
+    purpose: ConsentPurpose
+    status: ConsentStatus
+    captured_at: datetime
+    withdrawn_at: datetime | None
+    expires_at: datetime | None
+    notice_version: str
+    capture_method: str
+    proof_reference: str | None
+
+
+class CandidateAnonymizeResponse(BaseModel):
+    candidate_id: UUID
+    anonymized_at: datetime
+    resumes_deleted: int
+    consents_withdrawn: int
+
+
 class RetentionSweepResponse(BaseModel):
     inspected_count: int
     expired_count: int
     failed_count: int
+    consents_expired: int = 0
 
 
 class JobCreate(BaseModel):
-    created_by_recruiter_id: UUID
+    # Optional: defaults to the authenticated recruiter. Only admins may name another.
+    created_by_recruiter_id: UUID | None = None
     title: str = Field(min_length=1, max_length=300)
     department: str | None = Field(default=None, max_length=200)
     location: str | None = Field(default=None, max_length=300)
@@ -213,6 +280,7 @@ class CandidateRead(ORMModel):
     phone: str | None
     created_at: datetime
     updated_at: datetime
+    anonymized_at: datetime | None = None
 
 
 class ApplicationRead(ORMModel):
@@ -428,6 +496,11 @@ class VerificationRecordCreate(BaseModel):
 __all__ = [
     "ApplicationRead",
     "ApplicationCreate",
+    "CandidateAnonymizeResponse",
+    "ConsentGrantRequest",
+    "ConsentRead",
+    "RecruiterAccountCreate",
+    "SkillVocabularyResponse",
     "CandidateCreate",
     "CandidateCreatedResponse",
     "CandidateDetailResponse",

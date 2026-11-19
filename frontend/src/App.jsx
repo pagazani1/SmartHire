@@ -4,17 +4,64 @@ import FileUpload from "./components/FileUpload.jsx";
 import Icon from "./components/Icon.jsx";
 import JobDescriptionField from "./components/JobDescriptionField.jsx";
 import PersistentScreeningWorkspace from "./components/PersistentScreeningWorkspace.jsx";
+import CandidatesView from "./components/CandidatesView.jsx";
+import DashboardView from "./components/DashboardView.jsx";
+import JobsView from "./components/JobsView.jsx";
+import LoginScreen from "./components/LoginScreen.jsx";
 import Sidebar from "./components/Sidebar.jsx";
+import { AuthProvider, useAuth } from "./context/AuthContext.jsx";
 
 const ANALYZE_ENDPOINT = "/api/analyze/";
 
-function App() {
-  const [activeView, setActiveView] = useState("persistent");
+const VIEW_META = {
+  dashboard: {
+    crumb: "Dashboard",
+    title: "Recruiter dashboard",
+    subtitle: "Your jobs, candidates and what to do next.",
+  },
+  jobs: {
+    crumb: "Jobs",
+    title: "Jobs & requirements",
+    subtitle:
+      "Create jobs and define the required skill groups that decide the screening result.",
+  },
+  candidates: {
+    crumb: "Candidates",
+    title: "Candidates, consent & resumes",
+    subtitle:
+      "Add candidates, record consent, upload resumes and handle erasure requests.",
+  },
+  persistent: {
+    crumb: "Screening",
+    title: "Application screening & history",
+    subtitle:
+      "Screen candidate applications against versioned job requirements with consent checks and auditable history.",
+  },
+  quick: {
+    crumb: "Quick resume check",
+    title: "Quick resume analysis",
+    subtitle:
+      "Run a quick, stateless comparison between a PDF resume and pasted job description text.",
+  },
+};
+
+function getInitials(name) {
+  if (!name) return "HR";
+  const parts = name.trim().split(/\s+/);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+function MainWorkspace() {
+  const [activeView, setActiveView] = useState("dashboard");
+  const [screeningCandidateId, setScreeningCandidateId] = useState("");
   const [file, setFile] = useState(null);
   const [jobDescription, setJobDescription] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState(null);
   const [error, setError] = useState("");
+
+  const { recruiter, authFetch, logout } = useAuth();
 
   function handleFileChange(nextFile) {
     setFile(nextFile);
@@ -59,7 +106,7 @@ function App() {
     setError("");
     setAnalysis(null);
     try {
-      const response = await fetch(ANALYZE_ENDPOINT, {
+      const response = await authFetch(ANALYZE_ENDPOINT, {
         method: "POST",
         body: formData,
       });
@@ -85,6 +132,10 @@ function App() {
     }
   }
 
+  if (!recruiter) return <LoginScreen />;
+
+  const meta = VIEW_META[activeView] ?? VIEW_META.dashboard;
+
   return (
     <div className="min-h-screen bg-[#f7f8fa] text-slate-900">
       <Sidebar activeView={activeView} onSelectView={setActiveView} />
@@ -95,21 +146,38 @@ function App() {
             <span className="hidden sm:inline">Workspace</span>
             <Icon name="chevronRight" className="hidden h-4 w-4 sm:block" />
             <span className="font-semibold text-slate-800">
-              {activeView === "persistent"
-                ? "Application screening"
-                : "Quick resume check"}
+              {meta.crumb}
             </span>
           </div>
+
           <div className="flex items-center gap-3">
-            <span className="hidden text-sm text-slate-500 sm:block">
-              Recruiter workspace
-            </span>
-            <div
-              aria-label="Recruiter profile"
-              className="flex h-9 w-9 items-center justify-center rounded-full bg-indigo-50 text-xs font-bold text-indigo-700 ring-1 ring-indigo-100"
-            >
-              HR
-            </div>
+            {recruiter ? (
+              <div className="flex items-center gap-2.5">
+                <div className="hidden text-right sm:block">
+                  <p className="text-xs font-semibold text-slate-900 leading-tight">
+                    {recruiter.display_name}
+                  </p>
+                  <p className="text-[11px] font-medium text-slate-500 capitalize">
+                    {recruiter.role}
+                  </p>
+                </div>
+                <div
+                  aria-label="Recruiter profile"
+                  className="flex h-9 w-9 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-800 ring-1 ring-indigo-200"
+                  title={`${recruiter.display_name} (${recruiter.role})`}
+                >
+                  {getInitials(recruiter.display_name)}
+                </div>
+                <button
+                  className="ml-1 hidden rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 sm:inline-flex items-center gap-1.5 transition"
+                  onClick={logout}
+                  type="button"
+                >
+                  <Icon name="logOut" className="h-3.5 w-3.5" />
+                  Sign Out
+                </button>
+              </div>
+            ) : null}
           </div>
         </header>
 
@@ -123,14 +191,10 @@ function App() {
                 RECRUITER WORKSPACE
               </p>
               <h1 className="text-3xl font-bold tracking-tight text-slate-950 sm:text-[2.1rem]">
-                {activeView === "persistent"
-                  ? "Application screening & history"
-                  : "Quick resume analysis"}
+                {meta.title}
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500 sm:text-base">
-                {activeView === "persistent"
-                  ? "Screen candidate applications against versioned job requirements with consent checks and auditable history."
-                  : "Run a quick, stateless comparison between a PDF resume and pasted job description text."}
+                {meta.subtitle}
               </p>
             </div>
             <div className="inline-flex w-fit items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-800">
@@ -139,8 +203,22 @@ function App() {
             </div>
           </section>
 
-          {activeView === "persistent" ? (
-            <PersistentScreeningWorkspace />
+          {activeView === "dashboard" ? (
+            <DashboardView onNavigate={setActiveView} />
+          ) : activeView === "jobs" ? (
+            <JobsView />
+          ) : activeView === "candidates" ? (
+            <CandidatesView
+              onOpenScreening={(candidateId) => {
+                setScreeningCandidateId(candidateId);
+                setActiveView("persistent");
+              }}
+            />
+          ) : activeView === "persistent" ? (
+            <PersistentScreeningWorkspace
+              initialCandidateId={screeningCandidateId}
+              key={screeningCandidateId || "default"}
+            />
           ) : (
             <>
               <div className="grid gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(330px,0.9fr)]">
@@ -270,6 +348,14 @@ function App() {
         </main>
       </div>
     </div>
+  );
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <MainWorkspace />
+    </AuthProvider>
   );
 }
 

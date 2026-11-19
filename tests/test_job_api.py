@@ -1,5 +1,7 @@
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -13,10 +15,12 @@ from backend.db.models import (
     JobDescriptionVersion,
     JobRequirementGroup,
     Recruiter,
+    RecruiterRole,
 )
 from backend.db.session import get_db
 from backend.main import app
 from scripts.seed_dev_recruiter import seed_development_recruiter
+from tests.auth_helpers import AUTH_ENV, bearer_headers
 
 
 class TestJobAPI(unittest.TestCase):
@@ -44,10 +48,14 @@ class TestJobAPI(unittest.TestCase):
 
         self.original_override = app.dependency_overrides.get(get_db)
         app.dependency_overrides[get_db] = override_get_db
+        self.auth_env = patch.dict(os.environ, AUTH_ENV)
+        self.auth_env.start()
         self.client = TestClient(app)
+        self.client.headers.update(bearer_headers(self.recruiter_id))
 
     def tearDown(self):
         self.client.close()
+        self.auth_env.stop()
         if self.original_override is None:
             app.dependency_overrides.pop(get_db, None)
         else:
@@ -100,13 +108,35 @@ class TestJobAPI(unittest.TestCase):
         self.assertEqual(unsupported_skill.status_code, 422)
         self.assertEqual(invalid_status.status_code, 422)
 
-    def test_create_job_requires_an_existing_recruiter(self):
+    def test_create_job_cannot_name_another_recruiter(self):
+        response = self._create_job(created_by_recruiter_id=str(uuid4()))
+
+        self.assertEqual(response.status_code, 403)
+        with self.SessionLocal() as session:
+            self.assertEqual(session.scalar(select(Job)), None)
+
+    def test_admin_naming_an_unknown_recruiter_gets_not_found(self):
+        with self.SessionLocal() as session:
+            recruiter = session.get(Recruiter, self.recruiter_id)
+            recruiter.role = RecruiterRole.ADMIN
+            session.commit()
         response = self._create_job(created_by_recruiter_id=str(uuid4()))
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "Recruiter not found.")
+
+    def test_created_by_defaults_to_the_authenticated_recruiter(self):
+        payload = {
+            "title": "Data Engineer",
+            "description": "Build pipelines with Python.",
+            "required_skill_groups": [["Python"]],
+        }
+        response = self.client.post("/api/jobs/", json=payload)
+
+        self.assertEqual(response.status_code, 201, response.text)
         with self.SessionLocal() as session:
-            self.assertEqual(session.scalar(select(Job)), None)
+            job = session.scalar(select(Job))
+            self.assertEqual(job.created_by_recruiter_id, self.recruiter_id)
 
     def test_list_jobs_and_pagination(self):
         first = self._create_job(title="First Role")

@@ -108,6 +108,12 @@ class TestResumeDocumentAPI(unittest.TestCase):
             session.flush()
             self.recruiter_id = self.recruiter.id
             self.candidate_id = self.candidate.id
+            owned_job = Job(
+                title="Owned Synthetic Role", created_by_recruiter_id=self.recruiter_id
+            )
+            session.add(owned_job)
+            session.flush()
+            session.add(Application(candidate_id=self.candidate_id, job_id=owned_job.id))
             self.consent_id = self._add_consent(
                 session, self.candidate_id, ConsentPurpose.DOCUMENT_STORAGE
             )
@@ -188,7 +194,8 @@ class TestResumeDocumentAPI(unittest.TestCase):
         return UUID(response.json()["id"])
 
     def test_upload_stores_valid_pdf_metadata_and_random_key(self):
-        response = self._upload()
+        pdf_bytes = self._pdf_bytes()
+        response = self._upload(contents=pdf_bytes)
 
         self.assertEqual(response.status_code, 201, response.text)
         body = response.json()
@@ -199,7 +206,7 @@ class TestResumeDocumentAPI(unittest.TestCase):
         self.assertNotIn("sha256", body)
         with self.SessionLocal() as session:
             document = session.get(ResumeDocument, UUID(body["id"]))
-            self.assertEqual(document.byte_size, len(self._pdf_bytes()))
+            self.assertEqual(document.byte_size, len(pdf_bytes))
             self.assertEqual(len(document.sha256), 64)
             self.assertEqual(UUID(document.storage_key).version, 4)
             self.assertTrue(LocalFilesystemStorage().exists(document.storage_key))

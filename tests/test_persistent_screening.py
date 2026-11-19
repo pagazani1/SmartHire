@@ -290,7 +290,13 @@ class TestPersistentScreening(unittest.TestCase):
                 notice_version="v1.0",
                 capture_method="web_form",
             )
-            session.add_all([other_candidate, other_storage_consent])
+            session.add_all(
+                [
+                    other_candidate,
+                    other_storage_consent,
+                    Application(candidate=other_candidate, job_id=self.job_id),
+                ]
+            )
             session.flush()
             other_candidate_id = other_candidate.id
             other_consent_id = other_storage_consent.id

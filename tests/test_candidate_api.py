@@ -1,5 +1,7 @@
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -26,6 +28,7 @@ from backend.db.models import (
 )
 from backend.db.session import get_db
 from backend.main import app
+from tests.auth_helpers import AUTH_ENV, bearer_headers
 
 
 class TestCandidateAPI(unittest.TestCase):
@@ -48,11 +51,15 @@ class TestCandidateAPI(unittest.TestCase):
                 yield session
 
         app.dependency_overrides[get_db] = override_get_db
+        self.auth_env = patch.dict(os.environ, AUTH_ENV)
+        self.auth_env.start()
         self.client = TestClient(app)
         self.recruiter_id, self.job_id = self._create_job()
+        self.client.headers.update(bearer_headers(self.recruiter_id))
 
     def tearDown(self):
         self.client.close()
+        self.auth_env.stop()
         app.dependency_overrides.pop(get_db, None)
         self.engine.dispose()
         self.database_dir.cleanup()

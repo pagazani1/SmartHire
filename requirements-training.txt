@@ -1,0 +1,5 @@
+# Extra packages for retraining and evaluating the ML models (not needed to serve the API).
+-r requirements-dev.txt
+datasets>=2.12.0
+matplotlib>=3.7.0
+seaborn>=0.12.0

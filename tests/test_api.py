@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,12 +8,16 @@ import pymupdf
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.security import get_current_recruiter
 from src.pdf_extractor import NoExtractableTextError
 from src.resume_analyzer import analyze_resume as run_resume_analyzer
 
 
 class TestSmartHireAPI(unittest.TestCase):
     def setUp(self):
+        # These tests cover analysis behaviour only; authentication is tested separately.
+        app.dependency_overrides[get_current_recruiter] = lambda: SimpleNamespace(id=None)
+        self.addCleanup(app.dependency_overrides.pop, get_current_recruiter, None)
         self.client = TestClient(app)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.temp_path = Path(self.temp_dir.name)
@@ -169,14 +174,13 @@ class TestSmartHireAPI(unittest.TestCase):
                 self.assertIn("cannot be empty", response.json()["detail"])
 
     def test_invalid_pdf_upload_returns_bad_request_and_cleans_temp_file(self):
-        observed_temp_path = None
+        # A file without a PDF signature is now rejected before analysis runs
+        # (the response contract is unchanged). Temp-file cleanup for the
+        # analysis-time failure path is covered by the extraction-error test.
+        temp_root = Path(tempfile.gettempdir())
+        before = set(temp_root.glob("smarthire-upload-*"))
 
-        def fake_analyze(path, _jd_text):
-            nonlocal observed_temp_path
-            observed_temp_path = Path(path)
-            return run_resume_analyzer(path, _jd_text)
-
-        with patch("backend.main.analyze_resume", side_effect=fake_analyze):
+        with patch("backend.main.analyze_resume") as analyze:
             response = self.client.post(
                 "/api/analyze/",
                 files={"file": ("invalid.pdf", b"not a PDF", "application/pdf")},
@@ -186,9 +190,8 @@ class TestSmartHireAPI(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Unable to extract text", response.json()["detail"])
         self.assertIn("OCR is not available", response.json()["detail"])
-        self.assertIsNotNone(observed_temp_path)
-        self.assertFalse(observed_temp_path.exists())
-        self.assertFalse(observed_temp_path.parent.exists())
+        analyze.assert_not_called()
+        self.assertEqual(set(temp_root.glob("smarthire-upload-*")), before)
 
     def test_extraction_error_returns_safe_message_and_cleans_temp_file(self):
         pdf_path = self._create_pdf()

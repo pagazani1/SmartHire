@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
-from predict import load_artifacts, predict, validate_text_input
+# The cached loader reads the model files once, not on every request. It keeps
+# the local name ``load_artifacts`` so existing patches/tests keep working.
+from predict import load_artifacts_cached as load_artifacts, predict, validate_text_input
 from src.decision_policy import apply_decision_policy
 from src.pdf_extractor import PDFExtractionError, extract_text_from_pdf
 from src.skill_extractor import analyse_skills

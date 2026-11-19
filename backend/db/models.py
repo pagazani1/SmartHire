@@ -611,9 +611,36 @@ class VerificationEvent(Base):
     changed_by: Mapped[Recruiter] = relationship()
 
 
+class AuditEvent(Base):
+    """Durable security/privacy audit trail. Holds identifiers only, never PII or resume text.
+
+    ``recruiter_id`` and ``resource_id`` are deliberately plain columns (no foreign
+    keys) so the trail survives deletion or anonymization of the rows it refers to.
+    """
+
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        Index("ix_audit_events_occurred_at", "occurred_at"),
+        Index("ix_audit_events_recruiter_occurred", "recruiter_id", "occurred_at"),
+        Index("ix_audit_events_event_occurred", "event", "occurred_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    event: Mapped[str] = mapped_column(String(100), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    recruiter_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
+    resource_type: Mapped[str | None] = mapped_column(String(50))
+    resource_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
+    reason: Mapped[str | None] = mapped_column(String(200))
+
+
 __all__ = [
     "Application",
     "ApplicationStatus",
+    "AuditEvent",
     "Candidate",
     "ConsentPurpose",
     "ConsentRecord",

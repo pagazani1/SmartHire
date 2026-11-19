@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from backend.db.models import (
     Application,
+    AuditEvent,
     Job,
     Recruiter,
     RecruiterRole,
@@ -43,8 +44,14 @@ def log_security_event(
     resource_type: str | None = None,
     resource_id: UUID | None = None,
     reason: str | None = None,
+    db: Session | None = None,
 ) -> None:
-    """Emit a structured, privacy-safe security audit log entry (never logs PII/paths/text)."""
+    """Emit a privacy-safe audit entry to the log and, when ``db`` is given, to the database.
+
+    Never records PII, file paths or resume text. The database copy is written with its
+    own short session so it survives a rollback of the request that triggered it, and a
+    failure to write it never breaks the request.
+    """
     payload: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "event": event,
@@ -56,6 +63,24 @@ def log_security_event(
     if reason:
         payload["reason"] = reason
     audit_logger.info(json.dumps(payload, sort_keys=True))
+
+    if db is None:
+        return
+    try:
+        with Session(bind=db.get_bind()) as audit_session:
+            audit_session.add(
+                AuditEvent(
+                    event=event[:100],
+                    outcome=outcome[:20],
+                    recruiter_id=recruiter_id,
+                    resource_type=resource_type[:50] if resource_type else None,
+                    resource_id=resource_id,
+                    reason=reason[:200] if reason else None,
+                )
+            )
+            audit_session.commit()
+    except Exception:  # noqa: BLE001 - auditing must never break the request
+        audit_logger.warning("Audit event could not be stored in the database.")
 
 
 def hash_password(plain_password: str) -> str:
@@ -199,12 +224,48 @@ def is_development_mode_enabled() -> bool:
     }
 
 
+_FORWARDING_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded")
+
+
 def is_loopback_request(request: Request) -> bool:
+    """True only for a direct local connection.
+
+    A reverse proxy makes every request look like it comes from 127.0.0.1, so any
+    request carrying proxy forwarding headers is never treated as loopback.
+    """
+    if any(request.headers.get(name) for name in _FORWARDING_HEADERS):
+        return False
     client_host = request.client.host if request.client is not None else ""
     try:
         return ipaddress.ip_address(client_host).is_loopback
     except ValueError:
         return False
+
+
+def validate_runtime_configuration() -> None:
+    """Fail fast at startup when production settings are unsafe."""
+    environment = os.getenv("SMART_HIRE_ENV", "").strip().casefold()
+    if environment not in {"production", "prod"}:
+        return
+    if is_development_mode_enabled():
+        raise RuntimeError(
+            "SMART_HIRE_DEVELOPMENT_MODE must not be enabled when SMART_HIRE_ENV=production."
+        )
+    if len(os.getenv("SMART_HIRE_AUTH_SECRET", "").strip()) < 32:
+        raise RuntimeError(
+            "SMART_HIRE_AUTH_SECRET (minimum 32 characters) is required in production."
+        )
+
+
+_DUMMY_PASSWORD_HASH: str | None = None
+
+
+def burn_password_verification_time(plain_password: str) -> None:
+    """Spend the same time as a real check so unknown accounts are not detectable by timing."""
+    global _DUMMY_PASSWORD_HASH
+    if _DUMMY_PASSWORD_HASH is None:
+        _DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(18))
+    verify_password(plain_password, _DUMMY_PASSWORD_HASH)
 
 
 def get_current_recruiter(
@@ -273,7 +334,9 @@ def get_current_recruiter(
     )
 
 
-def ensure_job_access(recruiter: Recruiter, job: Job) -> None:
+def ensure_job_access(
+    recruiter: Recruiter, job: Job, db: Session | None = None
+) -> None:
     """Enforce that only the owning recruiter or an admin may manage a job."""
     if recruiter.role == RecruiterRole.ADMIN:
         return
@@ -284,6 +347,7 @@ def ensure_job_access(recruiter: Recruiter, job: Job) -> None:
             recruiter_id=recruiter.id,
             resource_type="job",
             resource_id=job.id,
+            db=db,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -291,7 +355,9 @@ def ensure_job_access(recruiter: Recruiter, job: Job) -> None:
         )
 
 
-def ensure_application_access(recruiter: Recruiter, application: Application) -> None:
+def ensure_application_access(
+    recruiter: Recruiter, application: Application, db: Session | None = None
+) -> None:
     """Enforce recruiter ownership over an application via its parent job."""
     if recruiter.role == RecruiterRole.ADMIN:
         return
@@ -302,6 +368,7 @@ def ensure_application_access(recruiter: Recruiter, application: Application) ->
             recruiter_id=recruiter.id,
             resource_type="application",
             resource_id=application.id,
+            db=db,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -336,8 +403,43 @@ def ensure_resume_access(
             recruiter_id=recruiter.id,
             resource_type="resume_document",
             resource_id=document.id,
+            db=db,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to access this resume document.",
         )
+
+
+def recruiter_owns_candidate(db: Session, recruiter: Recruiter, candidate_id: UUID) -> bool:
+    """A recruiter owns a candidate when the candidate applied to one of their jobs."""
+    if recruiter.role == RecruiterRole.ADMIN:
+        return True
+    return (
+        db.query(Application.id)
+        .join(Job, Application.job_id == Job.id)
+        .filter(
+            Application.candidate_id == candidate_id,
+            Job.created_by_recruiter_id == recruiter.id,
+        )
+        .first()
+        is not None
+    )
+
+
+def ensure_candidate_access(db: Session, recruiter: Recruiter, candidate_id: UUID) -> None:
+    """Enforce that the candidate applied to the recruiter's job (admins may access all)."""
+    if recruiter_owns_candidate(db, recruiter, candidate_id):
+        return
+    log_security_event(
+        "rbac.candidate_access_denied",
+        outcome="denied",
+        recruiter_id=recruiter.id,
+        resource_type="candidate",
+        resource_id=candidate_id,
+        db=db,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You do not have permission to access this candidate.",
+    )

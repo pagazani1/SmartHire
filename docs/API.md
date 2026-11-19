@@ -3,19 +3,37 @@
 The interactive OpenAPI specification is available at `/docs` while the
 FastAPI service is running.
 
+## Authentication
+
+Every route except `GET /api/health/` and `POST /api/auth/login` requires a signed-in
+recruiter. There is no public registration: accounts are created by an administrator with
+`python -m scripts.create_recruiter` or `POST /api/admin/recruiters`.
+
+- `POST /api/auth/login` with `{"email", "password"}` returns `{"access_token", "expires_at",
+  "recruiter"}`. Send the token as `Authorization: Bearer <token>`. Tokens last 8 hours.
+  Wrong credentials, unknown emails and disabled accounts all return the same `401`.
+  After 5 failed attempts for one email and client address in 15 minutes, further attempts
+  return `429` with a `Retry-After` header. A missing or short `SMART_HIRE_AUTH_SECRET`
+  returns `503`.
+- `GET /api/auth/me` returns the current recruiter.
+- Any route returns `401` for a missing, invalid or expired token, and `503` with a plain
+  message when the database cannot be reached.
+
+**Ownership.** A recruiter sees only their own jobs, and only candidates who applied to one
+of their jobs (with only the applications and screenings for those jobs). Other recruiters'
+data returns `403`; unknown ids return `404`. Admins can see everything. The owner of a new
+job is always the signed-in recruiter (`created_by_recruiter_id` is optional; only an admin
+may name someone else).
+
 ## Job management
 
-Jobs are associated with an existing recruiter through
-`created_by_recruiter_id`. There is no public recruiter-creation endpoint.
-For local development only, create or reuse the stable seed recruiter with:
+Skill names in requirement groups must come from the supported vocabulary (`GET /api/skills/`).
+An unknown name returns `422` with a message naming it.
 
-```text
-python -m scripts.seed_dev_recruiter --development
-```
+### `GET /api/skills/`
 
-The command refuses non-local PostgreSQL hosts. Use the printed recruiter ID
-when creating a job. Authentication and recruiter ownership enforcement are
-not implemented; do not expose these endpoints to untrusted clients.
+Returns `{"skills": [...]}`: every skill name that can be used in required or preferred groups
+(145 at the time of writing, sorted case-insensitively).
 
 ### `POST /api/jobs/`
 
@@ -145,24 +163,74 @@ Analyses submitted to `POST /api/analyze/` do not appear in this history: that
 legacy endpoint remains stateless. Persistent screening writes are not
 implemented yet. Returns `404` when the candidate does not exist.
 
-## Private resume documents (development only)
+## Consent
 
-Resume-document routes require `SMART_HIRE_DEVELOPMENT_MODE=true`, a valid
-active recruiter UUID in `SMART_HIRE_DEVELOPMENT_RECRUITER_ID`, and a loopback
-client connection. Run the server bound to `127.0.0.1`; this guard is a
-development restriction, **not authentication or recruiter ownership
-authorization**. Do not expose these routes to untrusted networks or deploy
-this configuration in production.
+Consent is recorded by the recruiter on the candidate's behalf. SmartHire stores the record and
+the server-side time it was saved; it does not prove the candidate agreed, so keep your evidence
+elsewhere and reference it in `proof_reference`. Wording and legal basis need review before any
+real candidate data is used.
 
-Uploads require an existing candidate and a consent record for that same
-candidate with purpose `document_storage`, status `granted`, no withdrawal
-timestamp, and no expired `expires_at`. The recruiter ID is taken from server
-configuration, never from the request. Files are limited to 10 MiB. A `.pdf`
-extension and PDF-compatible MIME type are hints only; the server also checks
-the PDF signature, parseability, page count, and encryption. Encrypted PDFs
-are rejected. Valid scanned PDFs can be stored, but the existing analyzer
-does not provide OCR. This milestone does not add a consent-capture endpoint;
-the record must already have been captured through an approved workflow.
+- `POST /api/candidates/{id}/consents/` with `{"purpose", "notice_version", "capture_method",
+  "proof_reference"?, "application_id"?, "expires_at"?}` returns `201`. `purpose` is one of
+  `screening`, `document_storage`, `contact`, `background_verification`. The status and capture
+  time cannot be supplied by the client. `expires_at` must be in the future. `409` for an
+  erased candidate.
+- `GET /api/candidates/{id}/consents/` lists them, newest first.
+- `POST /api/consents/{consent_id}/withdraw` withdraws a consent (idempotent). Screening, resume
+  upload and resume download that depend on it are refused immediately afterwards (`403`).
+
+A consent past its `expires_at` is treated as invalid even before the housekeeping job marks its
+stored status as `expired`.
+
+## Candidate erasure
+
+### `POST /api/candidates/{candidate_id}/anonymize`
+
+Deletes the candidate's resume files, withdraws their consents, and replaces their name, email
+and phone with blanks (`anonymized_at` is set). Application and screening rows remain, without
+identity, for statistics and audit. If any file cannot be deleted the call returns `503` and
+nothing about the candidate is changed, so it can be retried. Repeating it is safe.
+
+## Persistent screening
+
+### `POST /api/applications/{application_id}/screenings/`
+
+Body: `{"resume_document_id", "job_description_version_id"}`. Header `Idempotency-Key` is
+required (max 255 characters). Requires active `screening` and `document_storage` consents, a
+resume belonging to the application's candidate, and a job description version of the
+application's job. The result stores the requirement groups as they were at the time.
+Repeating the same key with the same inputs returns the original run; the same key with
+different inputs returns `409`. A new key creates the next `run_number`.
+
+The response includes `final_label` (decided by required-group coverage, policy
+`required_skill_group_coverage_v2`), `model_label` (a weak reference signal that can differ),
+coverage counts, matched and missing skills, `decision_explanation` and evidence rows. If a job
+has no usable required groups, coverage is `null` and the label falls back to the model: the UI
+shows this as "manual review needed".
+
+### `GET /api/applications/{application_id}/screenings/`
+
+Lists past runs, newest first. `GET /api/candidates/{id}/screenings/` lists a candidate's runs for
+the recruiter's own jobs.
+
+## Administration
+
+- `POST /api/admin/recruiters` (admin only) creates an account: `{"email", "display_name",
+  "password" (min 10 characters), "role"?}`. `409` if the email exists.
+- `POST /api/admin/retention/sweep` (admin only) runs the housekeeping pass: it deletes resume
+  files past `retention_until`, then marks lapsed consents `expired`. The same pass can be
+  scheduled with `python -m scripts.run_retention_sweep`.
+
+## Private resume documents
+
+Uploading requires access to the candidate (see ownership above) and a consent record for that
+same candidate with purpose `document_storage`, status `granted`, no withdrawal timestamp, and
+no expired `expires_at`. The uploader is the signed-in recruiter. Each stored resume gets a
+`retention_until` date (default 180 days, `SMART_HIRE_RESUME_RETENTION_DAYS`, or the consent
+expiry if sooner). Files are limited to 10 MiB. A `.pdf` extension and PDF-compatible MIME type
+are hints only; the server also checks the PDF signature, parseability, page count, and
+encryption. Encrypted PDFs are rejected. Valid scanned PDFs can be stored, but the analyzer
+does not provide OCR.
 
 ### `POST /api/candidates/{candidate_id}/resumes/`
 
@@ -225,9 +293,12 @@ the stored object. A failed compensation may leave an orphan; an internal
 reconciliation operation can identify storage keys without database metadata.
 There is no public cleanup endpoint.
 
-## Existing stateless analysis
+## Stateless analysis (quick check)
 
 ### `POST /api/analyze/`
+
+Requires sign-in. The request and response contract is otherwise unchanged. Uploads over 10 MiB
+return `413`, and files without a PDF signature return `400`.
 
 The existing contract is unchanged. Submit `multipart/form-data` containing:
 
@@ -257,8 +328,7 @@ for the policy and limitations.
 
 ## Security and deployment status
 
-Authentication and authorization are not implemented. Candidate endpoints
-return personal profile fields and do not filter by recruiter ownership.
-Do not expose them on an untrusted network or use real candidate records
-until access control, consent, retention, and audit policies are implemented.
-The handlers do not log candidate profile values.
+Authentication, per-recruiter ownership, consent capture and withdrawal, erasure, retention and a
+durable audit trail (`audit_events`) are implemented. See
+[SECURITY_AND_PRIVACY.md](SECURITY_AND_PRIVACY.md) for what is and is not covered. This is a local
+demo build: it has not been deployed, penetration-tested or reviewed by a lawyer.

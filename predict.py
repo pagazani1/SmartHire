@@ -12,7 +12,11 @@ No new dependencies required – only joblib and scikit-learn, which
 are already listed in requirements.txt.
 """
 
+import os
 import sys
+import threading
+from pathlib import Path
+
 import joblib
 
 # Re-use the same clean_text() that was used during training.
@@ -28,20 +32,63 @@ from src.skill_extractor import analyse_skills, display_skills
 # Paths to saved model artifacts (mirrors config.py but kept explicit here
 # so predict.py can be run standalone without importing the full pipeline).
 # ---------------------------------------------------------------------------
-VECTORIZER_PATH = "models/tfidf_vectorizer.joblib"
-MODEL_PATH      = "models/logistic_regression.joblib"
+# Absolute paths anchored to this file, so inference works from any working
+# directory (the API server, tests and the CLI all resolve the same artifacts).
+_PROJECT_ROOT = Path(__file__).resolve().parent
+VECTORIZER_PATH = str(_PROJECT_ROOT / "models" / "tfidf_vectorizer.joblib")
+MODEL_PATH      = str(_PROJECT_ROOT / "models" / "logistic_regression.joblib")
 
 
-def load_artifacts():
-    """Load the TF-IDF vectorizer and the trained Logistic Regression model."""
-    print("[predict] Loading TF-IDF vectorizer...")
+def load_artifacts(verbose: bool = False):
+    """Load the TF-IDF vectorizer and the trained Logistic Regression model.
+
+    Reads both files from disk on every call. Server code should use
+    ``load_artifacts_cached`` instead. Progress messages are printed only when
+    ``verbose`` is true (the interactive CLI), never inside the API process.
+    """
+    if verbose:
+        print("[predict] Loading TF-IDF vectorizer...")
     vectorizer = joblib.load(VECTORIZER_PATH)
 
-    print("[predict] Loading Logistic Regression model...")
+    if verbose:
+        print("[predict] Loading Logistic Regression model...")
     model = joblib.load(MODEL_PATH)
 
-    print("[predict] Artifacts loaded successfully.\n")
+    if verbose:
+        print("[predict] Artifacts loaded successfully.\n")
     return vectorizer, model
+
+
+_ARTIFACT_CACHE: dict[tuple, tuple] = {}
+_ARTIFACT_CACHE_LOCK = threading.Lock()
+
+
+def _artifact_cache_key() -> tuple:
+    """Identify the artifact files by path, size and modification time."""
+    parts = []
+    for path in (VECTORIZER_PATH, MODEL_PATH):
+        stat = os.stat(path)  # FileNotFoundError propagates like joblib's would
+        parts.append((str(path), stat.st_size, stat.st_mtime_ns))
+    return tuple(parts)
+
+
+def load_artifacts_cached():
+    """Return the artifacts, loading them from disk only once per file version.
+
+    The cache key includes size and mtime, so replacing a model file on disk
+    is picked up on the next call without restarting the process. Failed loads
+    are never cached. Loaded scikit-learn objects are used read-only by
+    ``predict``, so sharing them between request threads is safe.
+    """
+    key = _artifact_cache_key()
+    with _ARTIFACT_CACHE_LOCK:
+        cached = _ARTIFACT_CACHE.get(key)
+        if cached is not None:
+            return cached
+        artifacts = load_artifacts()
+        _ARTIFACT_CACHE.clear()
+        _ARTIFACT_CACHE[key] = artifacts
+        return artifacts
 
 
 def get_multiline_input(prompt: str) -> str:
@@ -151,7 +198,7 @@ def main():
     print("=" * 50 + "\n")
 
     # 1. Load model artifacts
-    vectorizer, model = load_artifacts()
+    vectorizer, model = load_artifacts(verbose=True)
 
     # 2. Collect resume text
     resume_text = get_multiline_input("Paste the RESUME text below:")

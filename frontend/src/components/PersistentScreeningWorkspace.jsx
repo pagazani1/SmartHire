@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAuth } from "../context/AuthContext.jsx";
 import Icon from "./Icon.jsx";
+import { Alert } from "./ui.jsx";
 
 const FIT_BADGE_STYLES = {
   "Good Fit": "border-emerald-200 bg-emerald-50 text-emerald-800",
@@ -14,10 +16,11 @@ function generateIdempotencyKey() {
   return `ui-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 }
 
-function PersistentScreeningWorkspace() {
+function PersistentScreeningWorkspace({ initialCandidateId = "" }) {
+  const { authFetch } = useAuth();
   const [candidates, setCandidates] = useState([]);
   const [jobsById, setJobsById] = useState({});
-  const [selectedCandidateId, setSelectedCandidateId] = useState("");
+  const [selectedCandidateId, setSelectedCandidateId] = useState(initialCandidateId);
   const [candidateDetail, setCandidateDetail] = useState(null);
   const [selectedApplicationId, setSelectedApplicationId] = useState("");
   const [resumes, setResumes] = useState([]);
@@ -42,8 +45,8 @@ function PersistentScreeningWorkspace() {
     setError("");
     try {
       const [candidatesRes, jobsRes] = await Promise.all([
-        fetch("/api/candidates/?limit=100"),
-        fetch("/api/jobs/?limit=100"),
+        authFetch("/api/candidates/?limit=100"),
+        authFetch("/api/jobs/?limit=100"),
       ]);
       if (!candidatesRes.ok) {
         throw new Error(
@@ -80,7 +83,7 @@ function PersistentScreeningWorkspace() {
     } finally {
       setIsLoadingLists(false);
     }
-  }, []);
+  }, [authFetch]);
 
   useEffect(() => {
     loadDirectories();
@@ -104,8 +107,8 @@ function PersistentScreeningWorkspace() {
       setStatusNotice("");
       try {
         const [detailRes, resumesRes] = await Promise.all([
-          fetch(`/api/candidates/${selectedCandidateId}`),
-          fetch(`/api/candidates/${selectedCandidateId}/resumes/?limit=100`),
+          authFetch(`/api/candidates/${selectedCandidateId}`),
+          authFetch(`/api/candidates/${selectedCandidateId}/resumes/?limit=100`),
         ]);
         if (!detailRes.ok) {
           const detail = await readApiError(detailRes);
@@ -161,7 +164,7 @@ function PersistentScreeningWorkspace() {
     return () => {
       cancelled = true;
     };
-  }, [selectedCandidateId]);
+  }, [selectedCandidateId, authFetch]);
 
   const activeApplication = useMemo(() => {
     const apps = candidateDetail?.applications ?? [];
@@ -183,7 +186,7 @@ function PersistentScreeningWorkspace() {
       return;
     }
     try {
-      const response = await fetch(
+      const response = await authFetch(
         `/api/applications/${applicationId}/screenings/?limit=50`,
       );
       if (!response.ok) {
@@ -199,7 +202,7 @@ function PersistentScreeningWorkspace() {
     } catch {
       // Keep UI functional even if history fetch fails
     }
-  }, []);
+  }, [authFetch]);
 
   useEffect(() => {
     loadApplicationHistory(selectedApplicationId);
@@ -232,7 +235,7 @@ function PersistentScreeningWorkspace() {
     setStatusNotice("");
 
     try {
-      const response = await fetch(
+      const response = await authFetch(
         `/api/applications/${selectedApplicationId}/screenings/`,
         {
           method: "POST",
@@ -253,10 +256,19 @@ function PersistentScreeningWorkspace() {
       }
 
       const result = await response.json();
+      // The server answers 201 for both a new run and a safe replay, so compare run ids.
+      const isReplay = latestResult?.id === result.id;
       setLatestResult(result);
-      setStatusNotice(
-        `Persisted Run #${result.run_number} recorded under Idempotency-Key "${trimmedKey}". Re-submitting with the same key safely replays this exact run.`,
-      );
+      if (isReplay) {
+        setStatusNotice(
+          `This request was already processed, so Run #${result.run_number} is shown again. Click "Generate new key (new run)" to record a new run.`,
+        );
+      } else {
+        setStatusNotice(`Run #${result.run_number} recorded.`);
+        // A fresh key means the next click records a new run. Keep the key after a failure
+        // or a replay so retrying the same request stays safe.
+        setIdempotencyKey(generateIdempotencyKey());
+      }
       await loadApplicationHistory(selectedApplicationId);
     } catch (err) {
       setError(
@@ -306,8 +318,9 @@ function PersistentScreeningWorkspace() {
             </p>
           ) : candidates.length === 0 ? (
             <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm text-slate-600">
-              No candidates found in the database yet. Create a job, candidate,
-              active consents, and private resume via the API first.
+              You have no candidates yet. Create a job on the Jobs page, add a
+              candidate on the Candidates page, record consent and upload a PDF
+              resume, then come back here to screen.
             </div>
           ) : (
             <form className="space-y-5" onSubmit={handleRunScreening}>
@@ -620,7 +633,7 @@ function PersistentScreeningWorkspace() {
                 <tr className="border-b border-slate-200 text-xs font-semibold uppercase tracking-wide text-slate-500">
                   <th className="py-2.5 pr-4">Timestamp</th>
                   <th className="px-4 py-2.5">Final Decision</th>
-                  <th className="px-4 py-2.5">ML Prediction</th>
+                  <th className="px-4 py-2.5">Text-model reference</th>
                   <th className="px-4 py-2.5">Required Coverage</th>
                   <th className="px-4 py-2.5">Matched / Missing Required</th>
                   <th className="pl-4 py-2.5">Policy</th>
@@ -695,7 +708,6 @@ function PersistentResultCard({ result }) {
   const missingReq = (result.requirement_results ?? []).filter(
     (r) => !r.matched,
   );
-  const modelProbs = Object.entries(result.model_probabilities ?? {});
 
   return (
     <section
@@ -720,14 +732,22 @@ function PersistentResultCard({ result }) {
           >
             Final: {result.final_label}
           </span>
-          <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700">
-            ML Model: {result.model_label}
-          </span>
         </div>
       </div>
 
+      {result.required_skill_coverage_percentage === null ||
+      result.required_skill_coverage_percentage === undefined ? (
+        <div className="mt-5">
+          <Alert kind="warning" title="Manual review needed">
+            No usable required-skill evidence was available for this job, so the final label is
+            only the text model&apos;s guess. Add required skill groups to the job, or review this
+            candidate by hand.
+          </Alert>
+        </div>
+      ) : null}
+
       {/* Top Metrics */}
-      <div className="mt-6 grid gap-4 md:grid-cols-3">
+      <div className="mt-6 grid gap-4 md:grid-cols-2">
         <div className="rounded-xl border border-slate-200 p-4">
           <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
             Required Skill Group Coverage
@@ -741,25 +761,6 @@ function PersistentResultCard({ result }) {
             {result.matched_required_group_count} of{" "}
             {result.required_group_count} required groups satisfied
           </p>
-        </div>
-
-        <div className="rounded-xl border border-slate-200 p-4">
-          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-            ML Model Probabilities (Separate from Policy)
-          </p>
-          <div className="mt-2 space-y-1">
-            {modelProbs.map(([label, prob]) => (
-              <div
-                className="flex items-center justify-between text-xs"
-                key={label}
-              >
-                <span className="font-medium text-slate-700">{label}</span>
-                <span className="font-mono tabular-nums text-slate-900">
-                  {(prob * 100).toFixed(1)}%
-                </span>
-              </div>
-            ))}
-          </div>
         </div>
 
         <div className="rounded-xl border border-slate-200 p-4">
@@ -909,3 +910,5 @@ function formatScreeningHttpError(status, detail) {
 }
 
 export default PersistentScreeningWorkspace;
+
+export { PersistentResultCard };

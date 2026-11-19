@@ -1,0 +1,5 @@
+# Everything needed to run the test suite.
+-r requirements.txt
+httpx>=0.27.0
+# tests/test_stage5c_experiment.py imports evaluate_stage5c.py, which needs pyarrow.
+pyarrow>=12.0.0
